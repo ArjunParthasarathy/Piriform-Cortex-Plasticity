@@ -338,6 +338,7 @@ ei_pre = (num_e, num_neurons)
 
 def train_model():
     corrs = torch.zeros((epochs_inner,))
+    spars = torch.zeros_like(corrs)
 
     W_initial = compute_initial_recurrent_weights()
     W_trained = W_initial.clone().to(gpu)
@@ -390,6 +391,11 @@ def train_model():
         
         corrs[i] = odor_corrs(R_trained)[1].item()
         
+        sparsities = sparsity_per_odor(R_trained)
+        spars_novel = torch.mean(sparsities[novel_inds])
+        spars_familiar = torch.mean(sparsities[familiar_inds])
+        spars_term = (((spars_familiar - spars_novel) / (spars_novel + spars_familiar)) ** 2)
+        spars[i] = spars_term.item()
         
         # if track_weights:
         #     W_tracked[i, :] = W_trained[update_inds][track_inds].detach()
@@ -401,11 +407,11 @@ def train_model():
         with torch.no_grad():
             W_trained.clamp_(min=clamp_min, max=clamp_max)
             
-    return corrs, ie_update_inds, hbar_ff, W_initial, W_trained, R_initial, R_trained
+    return corrs, spars, ie_update_inds, hbar_ff, W_initial, W_trained, R_initial, R_trained
 
 # Save a particular training realization
 def save_realization(i):
-    corrs, _, hbar_ff, W_initial, W_trained, R_initial, R_trained = train_model()
+    corrs, spars, _, hbar_ff, W_initial, W_trained, R_initial, R_trained = train_model()
 
     with torch.no_grad():
         path = f'./ie/realization_{i}'
@@ -419,7 +425,15 @@ def save_realization(i):
         plt.title(f"Odor correlation across epochs")
         fig.savefig(f"{path}/ie_corrs.png")
 
-        fig, ax = plt.subplots(nrows=1, ncols=2)
+        fig = plt.figure()
+        plt.plot(torch.arange(epochs_inner), spars)
+        plt.xlabel("Epochs")
+        plt.ylabel("Sparsity")
+        plt.ylim(bottom=0.)
+        plt.title(f"Sparsity difference across epochs")
+        fig.savefig(f"{path}/ie_spars.png")
+
+        fig, ax = plt.subplots(nrows=1, ncols=2, sharey=True, constrained_layout=True)
         width = 0.25
         x_p = torch.arange(P // 2)
         sp_odor_initial = sparsity_per_odor(R_initial).detach().cpu()
@@ -455,6 +469,7 @@ def save_realization(i):
 
         # Save realization data
         torch.save(corrs, f"{path}/data/corrs.pt")
+        torch.save(spars, f"{path}/data/spars.pt")
         torch.save(hbar_ff, f"{path}/data/hbar_ff.pt")
         torch.save(W_initial, f"{path}/data/W_initial.pt")
         torch.save(W_trained, f"{path}/data/W_trained.pt")

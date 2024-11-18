@@ -1,9 +1,17 @@
+# %%
+# !pip install numpy
+# !pip install scipy
+# !pip install torch
+# !pip install matplotlib
+
+# %%
 import torch
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
 import os
 
+# %%
 gpu = torch.device("cuda:0")
 print(torch.cuda.get_device_name(0))
 
@@ -29,7 +37,7 @@ i_1 = 10.
 # Probability that a channel is active for an odor a
 f = 0.1
 # Number of odors
-P = 16
+P = 32
 # Novel activity is up to P // 2, and familiar activity is after
 novel_inds = torch.arange(0, P // 2)
 familiar_inds = torch.arange(P // 2, P)
@@ -61,12 +69,11 @@ def correlated_mitral_activity():
     activity = p_prime_activity @ projection
     return activity.to(gpu)
 
-# Takes in mitral activity I and feedforward weights W_ff and computes feedforward activity h_bar_ff
+# Takes in mitral activity I and computes feedforward activity h_bar_ff
 def compute_feedforward_activity(W_ff, I):
-    with torch.device(gpu):
+    with torch.device(gpu):        
         h_ff = (W_ff @ I) * (1 / np.sqrt(num_channel_inputs))
         h_bar_ff = torch.zeros_like(h_ff)
-        # Subtract by mean across (excitatory) neurons for each odor
         h_bar_ff[:num_e] = h_ff[:num_e] - torch.mean(h_ff[:num_e], dim=0, keepdim=True)
     return h_bar_ff
 
@@ -111,24 +118,19 @@ def compute_initial_recurrent_weights():
     
     return W_rec
 
+# %%
 # Computes activation threshold for neurons, based on the standard deviation of their firing rates across odors
 # This average standard deviation, multiplied by theta=2, ensures that each neuron will fire for only 5% of odors
-# def compute_threshold(total_input, theta):
-#     # For now, use diff thresholds for each neuron
-#     center = torch.mean(total_input, dim=1, keepdim=True)
-#     shift = torch.std(total_input, dim=1, keepdim=True)
-#     threshold = center + (theta * shift)
-#     # Since inhibitory neurons are linear
-#     threshold[num_e:, :] = 0
-#     return threshold
-
-# Computes activation threshold for neurons, right now set it at 0
-def compute_threshold():
-    threshold = torch.zeros((num_neurons, P), device=gpu)
+def compute_threshold(total_input, theta):
+    # For now, use diff thresholds for each neuron
+    center = torch.mean(total_input, dim=1, keepdim=True)
+    shift = torch.std(total_input, dim=1, keepdim=True)
+    threshold = center + (theta * shift)
     # Since inhibitory neurons are linear
     threshold[num_e:, :] = 0
     return threshold
 
+# %%
 # ReLU for excitatory, linear for inhibitory
 def neuron_activations(X):
     # Mask to keep excitatory
@@ -139,8 +141,9 @@ def neuron_activations(X):
     mask2[num_e:, :] = 1
     return (torch.relu(X) * mask1) + (X * mask2)
 
+# %%
 # Computes R for each odor, with the activation threshold theta
-def compute_piriform_response(h_bar_ff, W_rec):
+def compute_piriform_response(h_bar_ff, W_rec, threshold_mult):
     # The coefficient of x_bar
     tau = 1
     # time step
@@ -177,8 +180,8 @@ def compute_piriform_response(h_bar_ff, W_rec):
         X = X + (dXdt * dt)
     
     # The total input to the neuron at this last time step (should be equivalent to the resulting value of X after this time step, since dxdt = 0 after the recurrent network converges)
-    #total_input = part2 + part3
-    threshold = compute_threshold()
+    total_input = part2 + part3
+    threshold = compute_threshold(total_input, threshold_mult)
     
     # Plot derivatives to see if state converged
     # plt.plot(torch.arange(T-2), pts)
@@ -187,6 +190,26 @@ def compute_piriform_response(h_bar_ff, W_rec):
     
     return R
 
+# %%
+# Compute dimensionality of activity matrix R for either novel or familiar
+def compute_dim(R, odor_inds):
+    # Only compute for the excitatory neurons (b/c those are the ones that send signals to rest of brain
+    C = torch.cov(R[:num_e, odor_inds[0]:odor_inds[-1]])
+    dim = torch.trace(C) ** 2 / torch.trace(C @ C)
+    return dim
+
+# trace() is invariant for cyclic permutations of a matrix
+# Since C is symmetric, it can be orthogonally diagonalized into UDU^T where U is composed of orthonormal eigenvectors, U^T = U^-1, and D is a diagonal matrix of eigenvalues
+# therefore, trace(C) = trace(UDU^T) = trace(DU^TU) = trace(D) = sum(eigvals of C)
+# Similarly for the denominator, we need to compute the sum of the squared eigenvalues, which is trace(D^2). trace(D^2) = trace(D^2U^TU) = trace(UD^2U^T) = trace((UDU^T)^2)) [by the property of matrix exponentiation for a diagonalizable matrix] = trace(C^2) = trace(C @ C)
+
+# %%
+# Dimensionalities should be similar before performing plasticity, upper bound on dimensionality is 8 b/c there are 8 odors each for novel/familiar (this is the rank of the cov matrix)
+# Measures how many orthogonal directions in neuron space are needed to explain the set of odors (the max number of orthogonal directions is the number of neurons themselves)
+# print(C_novel0)
+# print(C_familiar0)
+
+# %%
 # Start and stop indices for the section of W_rec we want to update, respectively 
 # Takes in R_alpha, a vector of neuron responses to a particular odor
 def compute_update(model: torch.nn.Sequential, R_alpha: torch.Tensor, update_inds) -> torch.Tensor:
@@ -233,7 +256,7 @@ def sparsity_per_neuron(R, odor_inds):
 
 # %%
 # Try to minimize the correlations between values
-def loss_fn(R, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print=True):
+def loss_fn(R, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print=True):
     corr_sum, avg_corr = odor_corrs(R)
     corr_loss = (1 / P) * corr_sum
     corr_term = lambda_corr * corr_loss
@@ -252,22 +275,20 @@ def loss_fn(R, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print
     spars_novel = torch.mean(sparsities[novel_inds])
     spars_familiar = torch.mean(sparsities[familiar_inds])
     spars_term = lambda_sp * (((spars_familiar - spars_novel) / (spars_novel + spars_familiar)) ** 2)
-
-    sum_i = torch.sum(R[num_e:, :] ** 2) / (num_i * P)
-    i_term = lambda_i * sum_i
     
     if do_print:
-        #print("Avg Corr: %.4f, Corr: %.4f, Mu: %.4f, Var: %.4f, Sparsity: %.4f" % (avg_corr, corr_term, mu_term, var_term, spars_term))
-        print("Avg Corr: %.4f, Corr: %.4f, I: %.4f, Sparsity: %.4f" % (avg_corr, corr_term, i_term, spars_term))
-    loss = corr_term + i_term + mu_term + var_term + spars_term
+        print("Avg Corr: %.4f, Corr: %.4f, Mu: %.4f, Var: %.4f, Sparsity: %.4f" % (avg_corr, corr_term, mu_term, var_term, spars_term))
+    loss = corr_term + mu_term + var_term + spars_term
     return loss
 
-def loss_after_odors(W_rec: torch.Tensor, h_bar_ff: torch.Tensor, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print):   
-    R_new = compute_piriform_response(h_bar_ff, W_rec)
-    loss = loss_fn(R_new, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print)
+# %%
+def loss_after_odors(W_rec: torch.Tensor, h_bar_ff: torch.Tensor, threshold_mult, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print):   
+    R_new = compute_piriform_response(h_bar_ff, W_rec, threshold_mult)
+    loss = loss_fn(R_new, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print)
     
     return loss, R_new
 
+# %%
 # To check theoretical minimum odor correlations, generate random gaussian matrix of shape (num_neurons, 8) and this is what the minimum correlation should be
 # mu = torch.zeros((num_neurons, 16))
 # std = torch.ones((num_neurons, 16))
@@ -275,22 +296,23 @@ def loss_after_odors(W_rec: torch.Tensor, h_bar_ff: torch.Tensor, lambda_corr, l
 # loss_min = loss_fn(R_random)
 # Theoretical min of 0.05
 
-# def verify_initial_activities():
-#     runs = 50
-#     avg_corrs = torch.empty((runs,))
-#     total_losses = torch.empty((runs,))
-#     for i in range(runs):
-#         with torch.no_grad():
-#             a = correlated_mitral_activity()
-#             h = compute_feedforward_activity(a)
-#             w = compute_initial_recurrent_weights()
-#             r = compute_piriform_response(h, w, 0)
-#         total_loss, avg_corr = odor_corrs(r)
-#         print(f"Loss: {total_loss.item()}, Avg Corr: {avg_corr}")
-#         total_losses[i] = total_loss
-#         avg_corrs[i] = avg_corr
-#     plt.hist(avg_corrs, bins=15)
-#     plt.show()
+# %%
+def verify_initial_activities():
+    runs = 50
+    avg_corrs = torch.empty((runs,))
+    total_losses = torch.empty((runs,))
+    for i in range(runs):
+        with torch.no_grad():
+            a = correlated_mitral_activity()
+            h = compute_feedforward_activity(a)
+            w = compute_initial_recurrent_weights()
+            r = compute_piriform_response(h, w, 0)
+        total_loss, avg_corr = odor_corrs(r)
+        print(f"Loss: {total_loss.item()}, Avg Corr: {avg_corr}")
+        total_losses[i] = total_loss
+        avg_corrs[i] = avg_corr
+    plt.hist(avg_corrs, bins=15)
+    plt.show()
 
 def get_update_inds(post, pre, W):
     weights_slice = W[post[0]:post[1], pre[0]:pre[1]]
@@ -301,9 +323,10 @@ def get_update_inds(post, pre, W):
 
 import torch.optim as optim
 epochs_inner = 10000
+# Number of standard deviations from mean, we are trying 0 b/c 1 and 2 is too sparse
+threshold_multiplier = 0
 
-# lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp = 10, 1, 0, 0, 0
-lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp = 1, 0, 0, 0, 0
+lambda_corr, lambda_mu, lambda_var, lambda_sp = 1, 0, 0, 0
 
 mult = 100
 w_ie = 0.5
@@ -320,11 +343,10 @@ ie_pre = (0, num_e)
 ei_post = (0, num_e)
 ei_pre = (num_e, num_neurons)
 
-def train_model():
+def train_model(W_initial):
     corrs = torch.zeros((epochs_inner,))
     
-    W_initial = compute_initial_recurrent_weights()
-    W_trained = W_initial.clone().to(gpu)
+    W_trained = W_initial.detach().clone().to(gpu)
     W_trained.requires_grad_(True)
 
     ie_update_inds = get_update_inds(ie_post, ie_pre, W_trained)
@@ -333,21 +355,22 @@ def train_model():
     # Only update the relevant weights
     def w_hook(grad):
         new_grad = torch.zeros_like(grad)
-        new_grad[ie_update_inds] = grad[ie_update_inds]
+        new_grad[ei_update_inds] = grad[ei_update_inds]
         return new_grad
         
     #optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
     W_trained.register_hook(w_hook)
-
+    # Moved to LR -2 and 10000 epochs (I->E needs slower training)
+    # Move even more to LR -3
     optimizer = optim.Adam([W_trained], lr=1e-3)
-    
+        
     I = correlated_mitral_activity()
     W_ff = compute_feedforward_weights()
     hbar_ff = compute_feedforward_activity(W_ff, I)   
-    R_initial = compute_piriform_response(hbar_ff, W_trained)
+    R_initial = compute_piriform_response(hbar_ff, W_trained, threshold_multiplier)
     R_trained = R_initial.clone()
     print(f"Initial loss: \t", end="")
-    loss_fn(R_initial, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp)
+    loss_fn(R_initial, lambda_corr, lambda_mu, lambda_var, lambda_sp)
     
     clamp_min = torch.zeros_like(W_trained)
     # I->E weights have lower negative bound
@@ -367,11 +390,12 @@ def train_model():
     #     W_tracked = torch.empty((epochs_inner, num_samples))
     
     for i in range(epochs_inner):
+            
         do_print=False
         if (i % 100 == 0):
             print(f"Epoch {i}: \t", end="")
             do_print = True
-        loss, R_trained = loss_after_odors(W_trained, hbar_ff, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print)
+        loss, R_trained = loss_after_odors(W_trained, hbar_ff, threshold_multiplier, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print)
         
         corrs[i] = odor_corrs(R_trained)[1].item()
         
@@ -389,11 +413,11 @@ def train_model():
     return corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained
 
 # Save a particular training realization
-def save_realization(i):
-    corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained = train_model()
+def save_realization(i, W):
+    corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained = train_model(W)
 
     with torch.no_grad():
-        path = f'./ie/realization_{i}'
+        path = f'./ei/realization_{i}'
         os.makedirs(f'{path}/data', exist_ok=True)
 
         fig = plt.figure()
@@ -402,9 +426,8 @@ def save_realization(i):
         plt.ylabel("Average correlation")
         plt.ylim(bottom=0.)
         plt.title(f"Odor correlation across epochs")
-        fig.savefig(f"{path}/ie_corrs.png")
+        fig.savefig(f"{path}/ei_corrs.png")
 
-        
         # Save realization data
         torch.save(corrs, f"{path}/data/corrs.pt")
         torch.save(I, f"{path}/data/I.pt")
@@ -414,7 +437,72 @@ def save_realization(i):
         torch.save(R_initial, f"{path}/data/R_initial.pt")
         torch.save(R_trained, f"{path}/data/R_trained.pt")
 
+W = compute_initial_recurrent_weights()
+for i in range(10):
+    save_realization(i, W)
 
-for i in range(10, 30):
-    save_realization(i)
+# %%
+# with torch.no_grad():
+#     sp_per_odor_0 = sparsity_per_odor(R_initial)
+#     sp_per_odor_f = sparsity_per_odor(R_trained)
+# 
+#     sp_per_neuron_novel_0 = sparsity_per_neuron(R_initial, novel_inds)
+#     sp_per_neuron_familiar_0 = sparsity_per_neuron(R_initial, familiar_inds)  
+#     sp_per_neuron_novel_f = sparsity_per_neuron(R_trained, novel_inds)
+#     sp_per_neuron_familiar_f = sparsity_per_neuron(R_trained, familiar_inds)
+#     
+#     plt.hist(sp_per_neuron_novel_0, cumulative=True, bins=num_e, histtype="step", label="Novel, before plasticity")
+#     plt.hist(sp_per_neuron_familiar_0, cumulative=True, bins=num_e, histtype="step", label="Familiar, before plasticity")
+#     plt.hist(sp_per_neuron_novel_f, cumulative=True, bins=num_e, histtype="step", label="Novel, after plasticity")
+#     plt.hist(sp_per_neuron_familiar_f, cumulative=True, bins=num_e, histtype="step", label="Familiar, after plasticity")
+#     plt.legend()
+#     plt.show()
+    
+# def compute_model_stats():
+#     runs = 10
+#     spars_per_odor_0 = torch.empty((runs, P))
+#     spars_per_odor_f = torch.empty((runs, P))
+#     # Difference in sparsity per neuron (either across the neuron's novel or familiar responses) measured before and after training
+#     spars_per_neuron_diff_0 = torch.empty((runs, num_e))
+#     spars_per_neuron_diff_f = torch.empty((runs, num_e))
+#     for i in range(runs):
+#         print(f"Run {i}")
+#         _, _, _, R_initial, R_trained = train_model()
+#         spars_per_odor_f[i, :] = sparsity_per_odor(R_initial)
+#         spars_per_odor_0[i, :] = sparsity_per_odor(R_trained)
+        
+#         spars_per_neuron_diff_0[i, :] = sparsity_per_neuron(R_initial, familiar_inds) - sparsity_per_neuron(R_initial, novel_inds)
+#         spars_per_neuron_diff_f[i, :] = sparsity_per_neuron(R_trained, familiar_inds) - sparsity_per_neuron(R_trained, novel_inds)
+    
+      
+#     spars_per_odor_0 = torch.mean(spars_per_odor_0, dim=0)
+#     spars_per_odor_f = torch.mean(spars_per_odor_f, dim=0)
+#     spars_per_neuron_diff_0 = torch.mean(spars_per_neuron_diff_0, dim=0)
+#     spars_per_neuron_diff_f = torch.mean(spars_per_neuron_diff_f, dim=0)
+    
+#     return spars_per_odor_0, spars_per_odor_f, spars_per_neuron_diff_0, spars_per_neuron_diff_f
+        
+
+# %%
+#sp_per_odor_0, sp_per_odor_f, sp_per_neuron_diff_0, sp_per_neuron_diff_f = compute_model_stats()
+
+# %%
+# with torch.no_grad():
+#     bars_f = plt.bar(["Mean of novel odor sparsities", "Mean of familiar odor sparsities"], [torch.mean(sp_per_odor_f[novel_inds]), torch.mean(sp_per_odor_f[familiar_inds])], label="After plasticity")
+#     bars_0 = plt.bar(["Mean of novel odor sparsities", "Mean of familiar odor sparsities"], [torch.mean(sp_per_odor_0[novel_inds]), torch.mean(sp_per_odor_0[familiar_inds])], label="Before plasticity")
+#     
+#     plt.title("Means of sparsities for each odor family (before and after plasticity)")
+#     plt.ylabel("Sparsity")
+#     plt.legend()
+#     plt.show()
+
+# %%
+# with torch.no_grad():
+#     a = torch.sum(torch.abs(sp_per_neuron_diff_0))
+#     b = torch.sum(torch.abs(sp_per_neuron_diff_f))
+#     #print(torch.count_nonzero(torch.isnan(sp_per_neuron_diff_f)))
+#     plt.title("Differences in sparsity per neuron (between odor families) before and after plasticity")
+#     plt.bar(["Before plasticity", "After plasticity"], [a, b])
+#     plt.show()
+
 

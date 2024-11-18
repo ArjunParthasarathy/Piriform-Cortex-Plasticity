@@ -46,10 +46,6 @@ def create_adj_matrix(p, m, n):
     A_mn = torch.bernoulli(probs)
     return A_mn
 
-# New way of generating correlations between odors: we want different sets of odors to be correlated differently, so that when we subtract each neuron's mean activity over odors, it doesn't cancel out the variation between odors (if all the odors are correlated the same, they will tend to produce similar values for a single neuron and therefore subtracting by the mean will remove these values and only leave small fluctuations)
-# So we sample a small set of odors P' and make them linearly independent, and then by multiplying by a P'x P gaussian matrix we project into mitral cell activity space for all P odors, basically making the P odors a linear combination of the set of P' odors (the smaller P' is, the more correlated the resulting set of P odors will be)
-# We also scale the variance depending on how small P' is, so we will maintain differently correlated odors, just with higher total correlation if P' is small
-
 P_prime = 4
 def correlated_mitral_activity():
     # Each of the P' odors is independent (correlation of 0)
@@ -111,17 +107,6 @@ def compute_initial_recurrent_weights():
     
     return W_rec
 
-# Computes activation threshold for neurons, based on the standard deviation of their firing rates across odors
-# This average standard deviation, multiplied by theta=2, ensures that each neuron will fire for only 5% of odors
-# def compute_threshold(total_input, theta):
-#     # For now, use diff thresholds for each neuron
-#     center = torch.mean(total_input, dim=1, keepdim=True)
-#     shift = torch.std(total_input, dim=1, keepdim=True)
-#     threshold = center + (theta * shift)
-#     # Since inhibitory neurons are linear
-#     threshold[num_e:, :] = 0
-#     return threshold
-
 # Computes activation threshold for neurons, right now set it at 0
 def compute_threshold():
     threshold = torch.zeros((num_neurons, P), device=gpu)
@@ -139,6 +124,7 @@ def neuron_activations(X):
     mask2[num_e:, :] = 1
     return (torch.relu(X) * mask1) + (X * mask2)
 
+# %%
 # Computes R for each odor, with the activation threshold theta
 def compute_piriform_response(h_bar_ff, W_rec):
     # The coefficient of x_bar
@@ -231,40 +217,42 @@ def sparsity_per_neuron(R, odor_inds):
                 (torch.sum(R[:num_e, odor_inds], dim=1) ** 2) / ((P // 2) * torch.sum(R[:num_e, odor_inds] ** 2, dim=1)))
     return sp_per_neuron
 
-# %%
 # Try to minimize the correlations between values
-def loss_fn(R, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print=True):
+def loss_fn(R, lambda_corr, lambda_mu, lambda_var, lambda_sp, R_initial=torch.empty((num_neurons, P)), do_print=True):
     corr_sum, avg_corr = odor_corrs(R)
     corr_loss = (1 / P) * corr_sum
     corr_term = lambda_corr * corr_loss
     
-    means = torch.mean(R, dim=0)
-    means_novel = torch.mean(means[novel_inds])
-    means_familiar = torch.mean(means[familiar_inds])
-    mu_term = lambda_mu * (((means_familiar - means_novel) / (means_novel + means_familiar)) ** 2)
+    # means = torch.mean(R, dim=0)
+    # means_novel = torch.mean(means[novel_inds])
+    # means_familiar = torch.mean(means[familiar_inds])
+    # mu_term = lambda_mu * (((means_familiar - means_novel) / (means_novel + means_familiar)) ** 2)
     
-    vars = torch.var(R, dim=0)
-    var_novel = torch.mean(vars[novel_inds])
-    var_familiar = torch.mean(vars[familiar_inds])
-    var_term = lambda_var * (((var_familiar - var_novel) / (var_novel + var_familiar)) ** 2)
+    # vars = torch.var(R, dim=0)
+    # var_novel = torch.mean(vars[novel_inds])
+    # var_familiar = torch.mean(vars[familiar_inds])
+    # var_term = lambda_var * (((var_familiar - var_novel) / (var_novel + var_familiar)) ** 2)
     
-    sparsities = sparsity_per_odor(R)
-    spars_novel = torch.mean(sparsities[novel_inds])
-    spars_familiar = torch.mean(sparsities[familiar_inds])
-    spars_term = lambda_sp * (((spars_familiar - spars_novel) / (spars_novel + spars_familiar)) ** 2)
+    spars_familiar_initial = sparsity_per_odor(R_initial.detach())[familiar_inds]
+    spars_familiar_curr = sparsity_per_odor(R)[familiar_inds]
+    spars_term = lambda_sp * torch.sum(((spars_familiar_curr - spars_familiar_initial) / (spars_familiar_curr + spars_familiar_initial)) ** 2)
+    
+    # spars_novel = torch.mean(sparsities[novel_inds])
+    # spars_familiar = torch.mean(sparsities[familiar_inds])
+    # spars_term = lambda_sp * (((spars_familiar - spars_novel) / (spars_novel + spars_familiar)) ** 2)
 
-    sum_i = torch.sum(R[num_e:, :] ** 2) / (num_i * P)
-    i_term = lambda_i * sum_i
+    # sum_i = torch.sum(R[num_e:, :] ** 2) / (num_i * P)
+    # i_term = lambda_i * sum_i
     
     if do_print:
         #print("Avg Corr: %.4f, Corr: %.4f, Mu: %.4f, Var: %.4f, Sparsity: %.4f" % (avg_corr, corr_term, mu_term, var_term, spars_term))
-        print("Avg Corr: %.4f, Corr: %.4f, I: %.4f, Sparsity: %.4f" % (avg_corr, corr_term, i_term, spars_term))
-    loss = corr_term + i_term + mu_term + var_term + spars_term
+        print("Avg Corr: %.4f, Corr: %.4f, Sparsity: %.4f" % (avg_corr, corr_term, spars_term))
+    loss = corr_term + spars_term
     return loss
 
-def loss_after_odors(W_rec: torch.Tensor, h_bar_ff: torch.Tensor, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print):   
+def loss_after_odors(R_initial: torch.Tensor, W_rec: torch.Tensor, h_bar_ff: torch.Tensor, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print):   
     R_new = compute_piriform_response(h_bar_ff, W_rec)
-    loss = loss_fn(R_new, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print)
+    loss = loss_fn(R_new, lambda_corr, lambda_mu, lambda_var, lambda_sp, R_initial=R_initial, do_print=do_print)
     
     return loss, R_new
 
@@ -303,7 +291,9 @@ import torch.optim as optim
 epochs_inner = 10000
 
 # lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp = 10, 1, 0, 0, 0
-lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp = 1, 0, 0, 0, 0
+# 1e-1 seemed to produce successful familiar odor sparsity
+# 1e0 was too high, created unstable loss
+lambda_corr, lambda_mu, lambda_var, lambda_sp = 1, 0, 0, 1e-1
 
 mult = 100
 w_ie = 0.5
@@ -320,10 +310,10 @@ ie_pre = (0, num_e)
 ei_post = (0, num_e)
 ei_pre = (num_e, num_neurons)
 
-def train_model():
+def train_model(I, W_ff, W_initial, r, snapshot_every=100):
     corrs = torch.zeros((epochs_inner,))
     
-    W_initial = compute_initial_recurrent_weights()
+    #W_initial = compute_initial_recurrent_weights()
     W_trained = W_initial.clone().to(gpu)
     W_trained.requires_grad_(True)
 
@@ -333,7 +323,7 @@ def train_model():
     # Only update the relevant weights
     def w_hook(grad):
         new_grad = torch.zeros_like(grad)
-        new_grad[ie_update_inds] = grad[ie_update_inds]
+        new_grad[ei_update_inds] = grad[ei_update_inds]
         return new_grad
         
     #optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
@@ -341,13 +331,13 @@ def train_model():
 
     optimizer = optim.Adam([W_trained], lr=1e-3)
     
-    I = correlated_mitral_activity()
-    W_ff = compute_feedforward_weights()
+    #I = correlated_mitral_activity()
+    #W_ff = compute_feedforward_weights()
     hbar_ff = compute_feedforward_activity(W_ff, I)   
     R_initial = compute_piriform_response(hbar_ff, W_trained)
     R_trained = R_initial.clone()
     print(f"Initial loss: \t", end="")
-    loss_fn(R_initial, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp)
+    loss_fn(R_initial, lambda_corr, lambda_mu, lambda_var, lambda_sp, R_initial=R_initial)
     
     clamp_min = torch.zeros_like(W_trained)
     # I->E weights have lower negative bound
@@ -360,24 +350,17 @@ def train_model():
     # I->E weights are only negative
     clamp_max[ei_update_inds] = ei_max_weight
     
-    # if track_weights:
-    #     # Number of weights to track across iterations
-    #     num_samples = 100
-    #     track_inds = torch.randint(0, len(update_inds), size=(num_samples,))
-    #     W_tracked = torch.empty((epochs_inner, num_samples))
-    
     for i in range(epochs_inner):
         do_print=False
         if (i % 100 == 0):
             print(f"Epoch {i}: \t", end="")
             do_print = True
-        loss, R_trained = loss_after_odors(W_trained, hbar_ff, lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp, do_print)
+        loss, R_trained = loss_after_odors(R_initial, W_trained, hbar_ff, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print)
         
         corrs[i] = odor_corrs(R_trained)[1].item()
         
-        
-        # if track_weights:
-        #     W_tracked[i, :] = W_trained[update_inds][track_inds].detach()
+        if (i % snapshot_every) == 0:
+            save_snapshot(r, i, W_trained, R_trained)
         
         loss.backward()   
         optimizer.step()
@@ -388,12 +371,48 @@ def train_model():
             
     return corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained
 
-# Save a particular training realization
-def save_realization(i):
-    corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained = train_model()
+def generate_spars_plot(fig, ax, sp_novel, sp_familiar, is_ei, is_trained):
+    start = 0.5
+    space = 1
+    width = space / 2
+    coords = [start, start+space]
+    spread = (torch.rand(size=(P // 2,)) - 0.5) * width
+
+    if is_ei is not None:
+        ax[is_ei, is_trained].scatter(spread + coords[0], sp_novel, label="Novel")
+        ax[is_ei, is_trained].scatter(spread + coords[1], sp_familiar, label="Familiar")
+        ax[is_ei, is_trained].set_xticks(ticks=coords, labels=[])
+        ax[is_ei, is_trained].set_xlim(left=coords[0]-(1.5*width), right=coords[1]+(1.5*width))
+        ax[is_ei, is_trained].set_ylim(0, 1)
+        ax[is_ei, is_trained].bar(coords, [torch.mean(sp_novel), torch.mean(sp_familiar)], width = width/2, alpha=0.5, color="green")
+        ax[is_ei, is_trained].legend(loc="lower left")
+    else:
+        ax[is_trained].scatter(spread + coords[0], sp_novel, label="Novel")
+        ax[is_trained].scatter(spread + coords[1], sp_familiar, label="Familiar")
+        ax[is_trained].set_xticks(ticks=coords, labels=[])
+        ax[is_trained].set_xlim(left=coords[0]-(1.5*width), right=coords[1]+(1.5*width))
+        ax[is_trained].set_ylim(0, 1)
+        ax[is_trained].bar(coords, [torch.mean(sp_novel), torch.mean(sp_familiar)], width = width/2, alpha=0.5, color="green")
+        ax[is_trained].legend(loc="lower left")
+
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+def save_snapshot(r, epoch, W, R):
+    path = f'./ei/realization_{r}'
+    subpath = f'{path}/data/snapshots'
 
     with torch.no_grad():
-        path = f'./ie/realization_{i}'
+        os.makedirs(f"{subpath}/epoch_{epoch}", exist_ok=True)
+        torch.save(W, f"{subpath}/epoch_{epoch}/W_trained.pt")
+        torch.save(R, f"{subpath}/epoch_{epoch}/R_trained.pt")
+
+# Save a particular training realization
+def save_realization(I, W_ff, W_initial, r, snapshot_every=100):
+    corrs, I, W_ff, W_initial, _, R_initial, R_trained = train_model(I, W_ff, W_initial, r, snapshot_every)
+
+    with torch.no_grad():
+        path = f'./ei/realization_{r}'
         os.makedirs(f'{path}/data', exist_ok=True)
 
         fig = plt.figure()
@@ -402,19 +421,36 @@ def save_realization(i):
         plt.ylabel("Average correlation")
         plt.ylim(bottom=0.)
         plt.title(f"Odor correlation across epochs")
-        fig.savefig(f"{path}/ie_corrs.png")
+        fig.savefig(f"{path}/ei_corrs.png")
+        plt.close()
 
+        fig, ax = plt.subplots(nrows=1, ncols=2, sharex=True, sharey=True)
+        ei_sp_odor_initial = sparsity_per_odor(R_initial.detach().cpu())
+        ei_sp_odor_trained = sparsity_per_odor(R_trained.detach().cpu())
+        ei_sp_novel_0 = ei_sp_odor_initial[novel_inds]
+        ei_sp_familiar_0 = ei_sp_odor_initial[familiar_inds]
+        ei_sp_novel_f = ei_sp_odor_trained[novel_inds]
+        ei_sp_familiar_f = ei_sp_odor_trained[familiar_inds]
+        generate_spars_plot(fig, ax, ei_sp_novel_0, ei_sp_familiar_0, None, 0)
+        ax[0].set_title("I->E: Initial")
+        generate_spars_plot(fig, ax, ei_sp_novel_f, ei_sp_familiar_f, None, 1)
+        ax[1].set_title("I->E: Trained")
+        fig.savefig(f"{path}/ei_spars.png")
+        plt.close()
         
         # Save realization data
         torch.save(corrs, f"{path}/data/corrs.pt")
         torch.save(I, f"{path}/data/I.pt")
         torch.save(W_ff, f"{path}/data/W_ff.pt")
+        # Only save initial weights/responses here, we save snapshots of the training elsewhere 
         torch.save(W_initial, f"{path}/data/W_initial.pt")
-        torch.save(W_trained, f"{path}/data/W_trained.pt")
         torch.save(R_initial, f"{path}/data/R_initial.pt")
-        torch.save(R_trained, f"{path}/data/R_trained.pt")
 
 
-for i in range(10, 30):
-    save_realization(i)
-
+for i in range(0, 5):
+    realization_type = f"../standard"
+    ie_path = f"{realization_type}/ei/realization_{i}/data"
+    W_initial = torch.load(f"{ie_path}/W_initial.pt")
+    I = torch.load(f"{ie_path}/I.pt")
+    W_ff = torch.load(f"{ie_path}/W_ff.pt")
+    save_realization(I, W_ff, W_initial, r=i, snapshot_every=100)
