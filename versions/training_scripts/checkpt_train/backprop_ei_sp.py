@@ -187,7 +187,6 @@ def compute_update(model: torch.nn.Sequential, R_alpha: torch.Tensor, update_ind
     
     return updates
 
-# %%
 def odor_corrs(R):
     # We don't care about the actual responses per odor, just about a neuron's fluctuations around its mean response across odors
     R_adjusted = R[:num_e, familiar_inds] - torch.mean(R[:num_e, familiar_inds], dim=1, keepdim=True)
@@ -202,7 +201,6 @@ def odor_corrs(R):
     
     return corr_sum, avg_corr
 
-# %%
 # Sparsity per odor, across all (E) neurons
 def sparsity_per_odor(R):
     # Epsilon for if we have zero responses
@@ -409,7 +407,7 @@ def save_snapshot(r, epoch, W, R):
 
 # Save a particular training realization
 def save_realization(I, W_ff, W_initial, r, snapshot_every=100):
-    corrs, I, W_ff, W_initial, _, R_initial, R_trained = train_model(I, W_ff, W_initial, r, snapshot_every)
+    corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained = train_model(I, W_ff, W_initial, r, snapshot_every)
 
     with torch.no_grad():
         path = f'./ei/realization_{r}'
@@ -441,10 +439,11 @@ def save_realization(I, W_ff, W_initial, r, snapshot_every=100):
         # Save realization data
         torch.save(corrs, f"{path}/data/corrs.pt")
         torch.save(I, f"{path}/data/I.pt")
-        torch.save(W_ff, f"{path}/data/W_ff.pt")
-        # Only save initial weights/responses here, we save snapshots of the training elsewhere 
+        torch.save(W_ff, f"{path}/data/W_ff.pt") 
         torch.save(W_initial, f"{path}/data/W_initial.pt")
         torch.save(R_initial, f"{path}/data/R_initial.pt")
+        torch.save(W_trained, f"{path}/data/W_trained.pt")
+        torch.save(R_trained, f"{path}/data/R_trained.pt")
 
 
 for i in range(0, 5):

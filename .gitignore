@@ -1,3 +1,5 @@
 **/ei/
 **/ie/
-**/train/
+**/ie_train/
+**/ei_train/
+*.pt
