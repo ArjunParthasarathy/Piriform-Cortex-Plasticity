@@ -286,7 +286,7 @@ def get_update_inds(post, pre, W):
     return update_inds
 
 import torch.optim as optim
-epochs_inner = 10000
+epochs_inner = 2000
 
 # lambda_corr, lambda_i, lambda_mu, lambda_var, lambda_sp = 10, 1, 0, 0, 0
 # 1e-1 seemed to produce successful familiar odor sparsity
@@ -350,7 +350,7 @@ def train_model(I, W_ff, W_initial, r, snapshot_every=100):
     
     for i in range(epochs_inner):
         do_print=False
-        if (i % 100 == 0):
+        if (i % snapshot_every == 0):
             print(f"Epoch {i}: \t", end="")
             do_print = True
         loss, R_trained = loss_after_odors(R_initial, W_trained, hbar_ff, lambda_corr, lambda_mu, lambda_var, lambda_sp, do_print)
@@ -358,7 +358,7 @@ def train_model(I, W_ff, W_initial, r, snapshot_every=100):
         corrs[i] = odor_corrs(R_trained)[1].item()
         
         if (i % snapshot_every) == 0:
-            save_snapshot(r, i, W_trained, R_trained)
+            save_snapshot(r, i, snapshot_every, W_trained, R_trained)
         
         loss.backward()   
         optimizer.step()
@@ -396,8 +396,8 @@ def generate_spars_plot(fig, ax, sp_novel, sp_familiar, is_ei, is_trained):
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-def save_snapshot(r, epoch, W, R):
-    path = f'./ei/realization_{r}'
+def save_snapshot(r, epoch, snapshot_every, W, R):
+    path = f'./snapshot{snapshot_every}/ei/realization_{r}'
     subpath = f'{path}/data/snapshots'
 
     with torch.no_grad():
@@ -410,7 +410,7 @@ def save_realization(I, W_ff, W_initial, r, snapshot_every=100):
     corrs, I, W_ff, W_initial, W_trained, R_initial, R_trained = train_model(I, W_ff, W_initial, r, snapshot_every)
 
     with torch.no_grad():
-        path = f'./ei/realization_{r}'
+        path = f'./snapshot{snapshot_every}/ei/realization_{r}'
         os.makedirs(f'{path}/data', exist_ok=True)
 
         fig = plt.figure()
@@ -452,4 +452,4 @@ for i in range(0, 5):
     W_initial = torch.load(f"{ie_path}/W_initial.pt")
     I = torch.load(f"{ie_path}/I.pt")
     W_ff = torch.load(f"{ie_path}/W_ff.pt")
-    save_realization(I, W_ff, W_initial, r=i, snapshot_every=100)
+    save_realization(I, W_ff, W_initial, r=i, snapshot_every=20)
