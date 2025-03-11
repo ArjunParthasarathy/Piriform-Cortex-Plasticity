@@ -14,11 +14,14 @@ eps = 1e-7
 
 M = torch.normal(torch.zeros((N, N)), torch.ones((N, N)))
 Q, _ = torch.linalg.qr(M)
-D = torch.diag(torch.exp(-torch.arange(N)))
+Q = Q.to(gpu)
+D = torch.diag(torch.exp(-torch.arange(N))).to(gpu)
 Sigma = Q @ D @ Q.t()
-r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N), Sigma)
+r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N, device=gpu), Sigma)
 
 W = torch.normal(torch.zeros(N), torch.ones(N))
+W = W.to(gpu)
+#W.requires_grad_(True)
 
 lr = 1e-3
 n_train = 2000
@@ -31,11 +34,11 @@ alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha
 degree = 2
 
 def load_features(start, end):
-    pre = torch.load("r_pre_gd.pt").detach().cpu()
-    pre_start = pre[start, :]
-    post = torch.load("r_post_gd.pt").detach().cpu()
+    post = torch.load("r_post.pt").detach().cpu()
     post_start = post[start, :]
-    W = torch.load("weights_gd.pt").detach().cpu()
+    pre = torch.load("r_pre.pt").detach().cpu()
+    pre_start = pre[start, :]
+    W = torch.load("weights.pt").detach().cpu()
     W0, Wf = W[start, :], W[end, :]
     return pre_start, post_start, W0, Wf
 
@@ -60,6 +63,10 @@ def prepare_features(r_pre, rpost, W):
 
     return transformed_features
 
+def manual_features(r_pre, rpost, W):
+    features = torch.stack((rpost*r_pre, (rpost ** 2) * W), dim=1)
+    return features
+
 def prepare_labels(W0, Wf):
     # # Last diff should be 0
     # delta_W = torch.empty_like(W)
@@ -72,7 +79,7 @@ def prepare_labels(W0, Wf):
 def load_loss(num_intervals, epoch_bound):
     if epoch_bound == None:
         epoch_bound = (0, n_train)
-    losses = torch.load(f"losses_gd.pt").detach().cpu()
+    losses = torch.load(f"losses.pt").detach().cpu()
     losses_region = losses[epoch_bound[0]: epoch_bound[1]]
     total_reduction = losses_region[-1] - losses_region[0]
     interval = total_reduction / (num_intervals)
@@ -99,9 +106,9 @@ def fit_weights(X, Y):
     #reg = ElasticNet(alpha=alpha, l1_ratio=1.0)
     
     # Already have intercept from power series transform
-    #reg = LinearRegression(fit_intercept=False)
+    reg = LinearRegression(fit_intercept=False)
     #reg = LinearRegression(fit_intercept=True) # now we have intercept
-    reg = Lasso(alpha=5e-2, fit_intercept=False)
+    #reg = Lasso(alpha=5e-2, fit_intercept=False)
     reg.fit(X, Y)
 
     return reg
@@ -112,13 +119,14 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     train_samples = []
     train_labels = []
     manual_int = n_train
-    #b = torch.arange(manual_int)
-    #num_intervals = manual_int-1
+    b = torch.arange(manual_int)
+    num_intervals = manual_int-1
     for i in range(num_intervals):
-        #start, end = b[i], b[i+1]
-        start, end = loss_intervals[i]
+        start, end = b[i], b[i+1]
+        #start, end = loss_intervals[i]
         pre, post, W0, Wf = load_features(start, end)
-        features = prepare_features(pre, post, W0)
+        #features = prepare_features(pre, post, W0)
+        features = manual_features(pre, post, W0)
         features = alphas[start] * features
         labels = prepare_labels(W0, Wf)
         train_samples.append(features)
@@ -132,8 +140,8 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     samples_mu = torch.mean(all_samples, dim=0, keepdim=True)
     samples_std = torch.std(all_samples, dim=0, keepdim=True)
     #print(samples_std.shape)
-    # print(samples_mu)
-    # print(samples_std)
+    #print(samples_mu)
+    #print(samples_std)
     #print(torch.min(samples_mu), torch.max(samples_mu))
     normed_samples = (all_samples - samples_mu) / (samples_std + eps)
 
@@ -145,32 +153,7 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     normed_Y = (all_labels - Y_mu) / (Y_std + eps)
     #normed_Y = all_labels
 
-    return loss_intervals, normed_samples.detach().cpu().numpy(), (normed_Y.detach().cpu().numpy(), Y_mu, Y_std)
-
-
-def accum_rule(Y_mu, Y_std, num_steps=100):
-    # Batches to draw from normal dist to (noisily) estimate PC1
-    B = 128
-    c = torch.cov(r_dist.sample((B,)).t())
-    _, eigvecs = torch.linalg.eigh(c)
-    # eigvals sorted in ascending order so take last one
-    pc1 = eigvecs[:, -1]
-    norm_pc1 = pc1 / torch.linalg.vector_norm(pc1)
-    W = torch.normal(torch.zeros(N), torch.ones(N))
-
-    losses = torch.empty((num_steps,))
-    for i in range(num_steps):
-        r_pre = r_dist.sample()
-        r_post = W.t() @ r_pre
-        X = prepare_features(r_pre, r_post, W)
-        delta_W = torch.from_numpy(reg.predict(X.detach().cpu().numpy())) * Y_std + Y_mu
-        W += delta_W
-        loss = 1-torch.abs(W.t() @ norm_pc1 / torch.linalg.vector_norm(W))
-        print(f"Iter {i}: {loss.item()}")
-        losses[i] = loss
-
-    return losses
-
+    return loss_intervals, normed_samples.detach().cpu().numpy(), normed_Y.detach().cpu().numpy()
 
 def compare_coefs(degree, numvars, coef):
     n = degree + 1
@@ -185,24 +168,18 @@ def compare_coefs(degree, numvars, coef):
             if (i, j) == (n-1, n-1):
                 ax[i, j].set_xlabel("degree w_start")
 
-    fig.supxlabel("degree post")
-    fig.supylabel("degree pre")
+    fig.supxlabel("degree pre")
+    fig.supylabel("degree post")
 
     fig.suptitle("Oja's Linear Predictor Coefficients")    
     plt.show()
 
 
-loss_intervals, features, label_data = prepare_train_data(alphas, num_intervals=50, epoch_subset=None)
-labels, mu, std = label_data
+loss_intervals, features, labels = prepare_train_data(alphas, num_intervals=50, epoch_subset=None)
 #print(f"Loss intervals: {loss_intervals}")
 reg = fit_weights(features, labels)
-print(f"Coefs: {reg.coef_}")
+coef0, coef1 = reg.coef_[0], reg.coef_[1]
+print(f"Coefs: \tpost*pre: {coef0:.2f}, post^2*W: {coef1:.2f}")
 print(f"R^2: {reg.score(features, labels)}")
-compare_coefs(degree=degree, numvars=3, coef=reg.coef_)
+#compare_coefs(degree=degree, numvars=3, coef=reg.coef_)
 plt.savefig("coefs.png")
-plt.close()
-
-losses = accum_rule(mu, std, num_steps=n_train)
-plt.plot(losses)
-plt.title("Loss: Learning Rule Accumulation")
-plt.savefig("accum_rule.png")

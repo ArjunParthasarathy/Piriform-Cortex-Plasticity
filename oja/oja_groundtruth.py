@@ -14,16 +14,15 @@ r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(
 
 W = torch.normal(torch.zeros(N), torch.ones(N))
 W = W.to(gpu)
-#W.requires_grad_(True)
+W.requires_grad_(True)
 
 lr = 1e-3
-n_train = 1000
-alpha_start = 1e-1
+n_train = 2000
+alpha_start = 1e-2
 alpha_end = 1e-3
 # Exponential decay lr starting at alpha_start and ending at alpha_end
-#alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
-alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
-mse = torch.nn.MSELoss()
+alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
+#alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
 optim = torch.optim.Adam([W], lr=lr)
 # Batches to draw from normal dist to (noisily) estimate PC1
 B = 128
@@ -38,25 +37,24 @@ pre = torch.empty((n_train, N))
 post = torch.empty((n_train, 1))
 for i in range(n_train):
     r_pre = r_dist.sample()
-    r_post = W @ r_pre.unsqueeze(1)
+    r_post = W.t() @ r_pre
     
-    delta_W = alphas[i] * r_post*(r_pre - r_post*W)
-    W += delta_W
     loss = 1-torch.abs(W.t() @ norm_pc1 / torch.linalg.vector_norm(W))
-    #loss = mse(W, norm_pc1)
     print(f"Iter {i}: {loss.item()}")
     losses[i] = loss.item()
     W_val[i] = W
     pre[i] = r_pre
     post[i] = r_post
-    #optim.zero_grad()
-    #loss.backward()
-    #optim.step()
+    #delta_W = alphas[i] * r_post*(r_pre - r_post*W)
+    #W += delta_W
+    optim.zero_grad()
+    loss.backward()
+    optim.step()
 
 
 plt.plot(losses)
-plt.savefig("losses.png")
-torch.save(losses, "losses.pt")
-torch.save(pre, "r_pre.pt")
-torch.save(post, "r_post.pt")
-torch.save(W_val, "weights.pt")
+plt.savefig("losses_gd.png")
+torch.save(losses, "losses_gd.pt")
+torch.save(pre, "r_pre_gd.pt")
+torch.save(post, "r_post_gd.pt")
+torch.save(W_val, "weights_gd.pt")
