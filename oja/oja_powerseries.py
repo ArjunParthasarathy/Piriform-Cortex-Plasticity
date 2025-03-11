@@ -101,7 +101,7 @@ def fit_weights(X, Y):
     # Already have intercept from power series transform
     #reg = LinearRegression(fit_intercept=False)
     #reg = LinearRegression(fit_intercept=True) # now we have intercept
-    reg = Lasso(alpha=5e-2, fit_intercept=False)
+    reg = Lasso(alpha=1e-1, fit_intercept=False)
     reg.fit(X, Y)
 
     return reg
@@ -112,11 +112,11 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     train_samples = []
     train_labels = []
     manual_int = n_train
-    #b = torch.arange(manual_int)
-    #num_intervals = manual_int-1
+    b = torch.arange(manual_int)
+    num_intervals = manual_int-1
     for i in range(num_intervals):
-        #start, end = b[i], b[i+1]
-        start, end = loss_intervals[i]
+        start, end = b[i], b[i+1]
+        #start, end = loss_intervals[i]
         pre, post, W0, Wf = load_features(start, end)
         features = prepare_features(pre, post, W0)
         features = alphas[start] * features
@@ -145,29 +145,39 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     normed_Y = (all_labels - Y_mu) / (Y_std + eps)
     #normed_Y = all_labels
 
-    return loss_intervals, normed_samples.detach().cpu().numpy(), (normed_Y.detach().cpu().numpy(), Y_mu, Y_std)
+    return loss_intervals, (normed_samples.detach().cpu().numpy(), samples_mu, samples_std), (normed_Y.detach().cpu().numpy(), Y_mu, Y_std)
 
 
-def accum_rule(Y_mu, Y_std, num_steps=100):
+def accum_rule(reg, X_mu, X_std, Y_mu, Y_std, num_steps=100):
     # Batches to draw from normal dist to (noisily) estimate PC1
-    B = 128
+    B = 1024
     c = torch.cov(r_dist.sample((B,)).t())
     _, eigvecs = torch.linalg.eigh(c)
     # eigvals sorted in ascending order so take last one
     pc1 = eigvecs[:, -1]
     norm_pc1 = pc1 / torch.linalg.vector_norm(pc1)
+
+    eta = 5e-1
     W = torch.normal(torch.zeros(N), torch.ones(N))
+    # TODO do we need to change how we z-score
+    # We also 
+    alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (n_train-1)))
 
     losses = torch.empty((num_steps,))
     for i in range(num_steps):
         r_pre = r_dist.sample()
         r_post = W.t() @ r_pre
-        X = prepare_features(r_pre, r_post, W)
-        delta_W = torch.from_numpy(reg.predict(X.detach().cpu().numpy())) * Y_std + Y_mu
-        W += delta_W
+        features = prepare_features(r_pre, r_post, W)
+        # alphas are same as training so we can z-score after multiplying by alpha
+        features = alphas_accum[i] * features
+        # LR doesn't decrease so converges faster than gradient descent, but less stable
+        features = (features - X_mu) / (X_std + eps)
         loss = 1-torch.abs(W.t() @ norm_pc1 / torch.linalg.vector_norm(W))
         print(f"Iter {i}: {loss.item()}")
         losses[i] = loss
+        
+        delta_W = torch.from_numpy(reg.predict(features.detach().cpu().numpy())) * Y_std + Y_mu
+        W += eta * delta_W
 
     return losses
 
@@ -192,8 +202,9 @@ def compare_coefs(degree, numvars, coef):
     plt.show()
 
 
-loss_intervals, features, label_data = prepare_train_data(alphas, num_intervals=50, epoch_subset=None)
-labels, mu, std = label_data
+loss_intervals, feature_data, label_data = prepare_train_data(alphas, num_intervals=50, epoch_subset=None)
+features, X_mu, X_std = feature_data
+labels, Y_mu, Y_std = label_data
 #print(f"Loss intervals: {loss_intervals}")
 reg = fit_weights(features, labels)
 print(f"Coefs: {reg.coef_}")
@@ -202,7 +213,7 @@ compare_coefs(degree=degree, numvars=3, coef=reg.coef_)
 plt.savefig("coefs.png")
 plt.close()
 
-losses = accum_rule(mu, std, num_steps=n_train)
+losses = accum_rule(reg, X_mu, X_std, Y_mu, Y_std, num_steps=n_train*5)
 plt.plot(losses)
 plt.title("Loss: Learning Rule Accumulation")
 plt.savefig("accum_rule.png")

@@ -25,12 +25,6 @@ alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha
 #alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
 optim = torch.optim.Adam([W], lr=lr)
 # Batches to draw from normal dist to (noisily) estimate PC1
-B = 128
-c = torch.cov(r_dist.sample((B,)).t())
-eigvals, eigvecs = torch.linalg.eigh(c)
-# eigvals sorted in ascending order so take last one
-pc1 = eigvecs[:, -1]
-norm_pc1 = pc1 / torch.linalg.vector_norm(pc1)
 losses = torch.empty((n_train,))
 W_val = torch.empty(n_train, N)
 pre = torch.empty((n_train, N))
@@ -39,6 +33,13 @@ for i in range(n_train):
     r_pre = r_dist.sample()
     r_post = W.t() @ r_pre
     
+    B = 512
+    c = torch.cov(r_dist.sample((B,)).t())
+    eigvals, eigvecs = torch.linalg.eigh(c)
+    # eigvals sorted in ascending order so take last one
+    pc1 = eigvecs[:, -1]
+    norm_pc1 = pc1 / torch.linalg.vector_norm(pc1)
+
     loss = 1-torch.abs(W.t() @ norm_pc1 / torch.linalg.vector_norm(W))
     print(f"Iter {i}: {loss.item()}")
     losses[i] = loss.item()
