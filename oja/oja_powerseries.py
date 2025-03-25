@@ -160,7 +160,6 @@ def accum_rule(reg, X_mu, X_std, Y_mu, Y_std, num_steps=100):
     eta = 5e-1
     W = torch.normal(torch.zeros(N), torch.ones(N))
     # TODO do we need to change how we z-score
-    # We also 
     alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (n_train-1)))
 
     losses = torch.empty((num_steps,))
