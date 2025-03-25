@@ -148,37 +148,57 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     return loss_intervals, (normed_samples.detach().cpu().numpy(), samples_mu, samples_std), (normed_Y.detach().cpu().numpy(), Y_mu, Y_std)
 
 
-def accum_rule(reg, X_mu, X_std, Y_mu, Y_std, num_steps=100):
+def accum_rule(reg, X_mu, X_std, Y_mu, Y_std, learning_rate_scale=1.0, num_steps=100, alpha_mode="none", sample_new_cov=True):
+    if sample_new_cov:
+        M = torch.normal(torch.zeros((N, N)), torch.ones((N, N)))
+        Q, _ = torch.linalg.qr(M)
+        D = torch.diag(torch.exp(-torch.arange(N)))
+        Sigma = Q @ D @ Q.t()
+        r_dist_accum = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N), Sigma)
+    else:
+        r_dist_accum = r_dist
+
     # Batches to draw from normal dist to (noisily) estimate PC1
     B = 1024
-    c = torch.cov(r_dist.sample((B,)).t())
+    c = torch.cov(r_dist_accum.sample((B,)).t())
     _, eigvecs = torch.linalg.eigh(c)
     # eigvals sorted in ascending order so take last one
     pc1 = eigvecs[:, -1]
     norm_pc1 = pc1 / torch.linalg.vector_norm(pc1)
 
-    eta = 5e-1
     W = torch.normal(torch.zeros(N), torch.ones(N))
+    Woja = W.clone()
     # TODO do we need to change how we z-score
-    alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (n_train-1)))
+    # We also 
+    alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (num_steps-1)))
 
     losses = torch.empty((num_steps,))
+    losses_oja = torch.empty((num_steps,))
     for i in range(num_steps):
-        r_pre = r_dist.sample()
+        r_pre = r_dist_accum.sample()
         r_post = W.t() @ r_pre
+        r_post_oja = Woja.t() @ r_pre
         features = prepare_features(r_pre, r_post, W)
         # alphas are same as training so we can z-score after multiplying by alpha
-        features = alphas_accum[i] * features
+        if alpha_mode == "same":
+            features = alphas_accum[i] * features
         # LR doesn't decrease so converges faster than gradient descent, but less stable
         features = (features - X_mu) / (X_std + eps)
         loss = 1-torch.abs(W.t() @ norm_pc1 / torch.linalg.vector_norm(W))
+        loss_oja = 1-torch.abs(Woja.t() @ norm_pc1 / torch.linalg.vector_norm(Woja))
         print(f"Iter {i}: {loss.item()}")
         losses[i] = loss
+        losses_oja[i] = loss_oja
         
         delta_W = torch.from_numpy(reg.predict(features.detach().cpu().numpy())) * Y_std + Y_mu
-        W += eta * delta_W
+        if alpha_mode == "after":
+            delta_W *= alphas_accum[i] * delta_W
 
-    return losses
+        delta_W_oja = r_post * (r_pre - r_post * Woja)
+        W += learning_rate_scale * delta_W
+        Woja += learning_rate_scale * delta_W_oja
+
+    return losses, losses_oja
 
 
 def compare_coefs(degree, numvars, coef):
@@ -212,7 +232,10 @@ compare_coefs(degree=degree, numvars=3, coef=reg.coef_)
 plt.savefig("coefs.png")
 plt.close()
 
-losses = accum_rule(reg, X_mu, X_std, Y_mu, Y_std, num_steps=n_train*5)
+losses, losses_oja = accum_rule(reg, X_mu, X_std, Y_mu, Y_std, learning_rate_scale=0.5, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=True)
 plt.plot(losses)
+# plt.plot(losses_oja)
+plt.ylim([0, 1])
 plt.title("Loss: Learning Rule Accumulation")
 plt.savefig("accum_rule.png")
+plt.show()
