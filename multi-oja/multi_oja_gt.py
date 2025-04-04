@@ -7,7 +7,7 @@ gpu = torch.device("cuda:0")
 # Neurons in input layer
 N_x = 16
 # Neurons in output layer - leq to input layer neurons
-N_y = 2
+N_y = 4
 M = torch.normal(torch.zeros((N_x, N_x)), torch.ones((N_x, N_x)))
 Q, _ = torch.linalg.qr(M)
 Q = Q.to(gpu)
@@ -15,9 +15,10 @@ D = torch.diag(torch.exp(-torch.arange(N_x))).to(gpu)
 Sigma = Q @ D @ Q.t()
 r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N_x, device=gpu), Sigma)
 
-W = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
-W = W.to(gpu)
-#W.requires_grad_(True)
+W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
+W_FF = W_FF.to(gpu)
+W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y))
+W_R = W_R.to(gpu)
 
 lr = 1e-3
 n_train = 2000
@@ -35,18 +36,22 @@ losses = torch.empty((n_train,))
 for i in range(n_train):
     r_pre = r_dist.sample().unsqueeze(1)
     r_post = W @ r_pre
-    
+    print(r_post.shape)
+
     B = 512
     c = torch.cov(r_dist.sample((B,)).t())
     eigvals, eigvecs = torch.linalg.eigh(c)
-    pc_i = eigvecs[:, -N_y:].t()
+    # Get first N_y PCs
+    pc_i = eigvecs[:, -N_y:].t().flip(dims=(0,))
+    #print(pc_i.shape)
+    #print(torch.linalg.vector_norm(pc_i, dim=1).unsqueeze(1).shape)
 
-    #print(eigvals[-N_y:], torch.exp(-torch.arange(N_x))[:N_y])
+    print(eigvals[-N_y:], torch.exp(-torch.arange(N_x))[:N_y])
 
     norm_pci = pc_i / torch.linalg.vector_norm(pc_i, dim=1).unsqueeze(1)
-    norm_W = W / torch.linalg.vector_norm(W, dim=1).unsqueeze(1)
+    norm_W = W_FF / torch.linalg.vector_norm(W_FF, dim=1).unsqueeze(1)
 
-    # transposing and unsqueezing to match required bmm format
+    # unsqueezing to match required bmm format (bmm is just doing a dot product here)
     a = torch.bmm(norm_W.unsqueeze(1), norm_pci.unsqueeze(2))
 
     loss = 1-torch.mean(torch.abs(a))
@@ -56,8 +61,10 @@ for i in range(n_train):
     # W_val[i] = W
     # pre[i] = r_pre
     # post[i] = r_post
-    delta_W = alphas[i] * r_post*(r_pre.t() - r_post*W)
-    W += delta_W
+    delta_W = alphas[i] * r_post*(r_pre.t() - r_post*W_FF)
+    W_FF += delta_W
+    # TODO GT anti-hebbian for recurrent weights    
+        
     # optim.zero_grad()
     # loss.backward()
     # optim.step()
