@@ -27,8 +27,7 @@ sigma_R = 0.1
 W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
 W_R = W_R.to(gpu)
 
-lr = 1e-3
-n_train = 2000
+n_train = 3000
 alpha_start = 1e-2
 alpha_end = 1e-3
 # Exponential decay lr starting at alpha_start and ending at alpha_end
@@ -38,13 +37,13 @@ alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha
 degree = 2
 
 def load_features(start, end):
-    pre = torch.load("r_pre_gd.pt").detach().cpu()
+    pre = torch.load("r_pre_gt.pt").detach().cpu()
     pre_start = pre[start, :]
-    post = torch.load("r_post_gd.pt").detach().cpu()
+    post = torch.load("r_post_gt.pt").detach().cpu()
     post_start = post[start, :]
-    W_FF = torch.load("w_ff_gd.pt").detach().cpu()
+    W_FF = torch.load("w_ff_gt.pt").detach().cpu()
     Wff_0, Wff_f = W_FF[start, :], W_FF[end, :]
-    W_R = torch.load("w_r_gd.pt").detach().cpu()
+    W_R = torch.load("w_r_gt.pt").detach().cpu()
     WR_0, WR_f = W_R[start, :], W_R[end, :]
     return pre_start, post_start, Wff_0, Wff_f, WR_0, WR_f
 
@@ -274,8 +273,8 @@ oja_labels, oja_Y_mu, oja_Y_std = oja_features_Y_stats
 ahebb_features, ahebb_X_mu, ahebb_X_std = ahebb_features_X_stats
 ahebb_labels, ahebb_Y_mu,ahebb_Y_std = ahebb_features_Y_stats
 #print(f"Loss intervals: {loss_intervals}")
-reg_oja = fit_powerseries(oja_features, oja_labels, alpha=5e-1)
-reg_ahebb = fit_powerseries(ahebb_features, ahebb_labels, alpha=1e-1)
+reg_oja = fit_powerseries(oja_features, oja_labels, alpha=1e-1)
+reg_ahebb = fit_powerseries(ahebb_features, ahebb_labels, alpha=5e-1)
 print(f"(Predicted) Oja Coefs: {reg_oja.coef_}")
 print(f"(Predicted) Anti-Hebbian Coefs: {reg_ahebb.coef_}")
 print(f"Oja R^2: {reg_oja.score(oja_features, oja_labels)}")
@@ -291,9 +290,9 @@ plt.close()
 
 oja_features_stats = (oja_X_mu, oja_X_std, oja_Y_mu, oja_Y_std)
 ahebb_features_stats = (ahebb_X_mu, ahebb_X_std, ahebb_Y_mu, ahebb_Y_std)
-losses, losses_oja = accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, learning_rate_scale=0.5, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=True)
+losses, losses_gt = accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, 
+                                learning_rate_scale=0.1, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=True)
 plt.plot(losses)
-# plt.plot(losses_oja)
 plt.ylim([0, 1])
 plt.title("Loss: Learning Rule Accumulation")
 plt.savefig("accum_rule.png")

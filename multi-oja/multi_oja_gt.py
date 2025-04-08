@@ -17,36 +17,38 @@ r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(
 
 W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
 W_FF = W_FF.to(gpu)
-W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y))
+sigma_R = 0.1
+W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
 W_R = W_R.to(gpu)
 
 lr = 1e-3
-n_train = 2000
+n_train = 3000
 alpha_start = 1e-1
 alpha_end = 1e-3
 # Exponential decay lr starting at alpha_start and ending at alpha_end
 alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
 #alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
-optim = torch.optim.Adam([W], lr=lr)
 # Batches to draw from normal dist to (noisily) estimate PC i
+
 losses = torch.empty((n_train,))
-#W_val = torch.empty(n_train, N)
-#pre = torch.empty((n_train, N))
-#post = torch.empty((n_train, 1))
+W_ff = torch.empty(n_train, N_y, N_x)
+W_r = torch.empty(n_train, N_y, N_y)
+pre = torch.empty((n_train, N_x))
+post = torch.empty((n_train, N_y))
+
 for i in range(n_train):
-    r_pre = r_dist.sample().unsqueeze(1)
-    r_post = W @ r_pre
-    print(r_post.shape)
+    X = r_dist.sample()
+    # Convergent dynamics matrix for output layer
+    W_tilde = torch.linalg.inv((torch.eye(N_y, device=gpu) - W_R))
+    # output neurons predicted with W_FF
+    Y_hat = W_tilde @ (W_FF @ X)
 
     B = 512
     c = torch.cov(r_dist.sample((B,)).t())
     eigvals, eigvecs = torch.linalg.eigh(c)
     # Get first N_y PCs
-    pc_i = eigvecs[:, -N_y:].t().flip(dims=(0,))
-    #print(pc_i.shape)
-    #print(torch.linalg.vector_norm(pc_i, dim=1).unsqueeze(1).shape)
-
-    print(eigvals[-N_y:], torch.exp(-torch.arange(N_x))[:N_y])
+    pc_i = eigvecs[:, -N_y:].t()
+    Y = pc_i @ X
 
     norm_pci = pc_i / torch.linalg.vector_norm(pc_i, dim=1).unsqueeze(1)
     norm_W = W_FF / torch.linalg.vector_norm(W_FF, dim=1).unsqueeze(1)
@@ -58,21 +60,22 @@ for i in range(n_train):
 
     print(f"Iter {i}: {loss.item()}")
     losses[i] = loss.item()
-    # W_val[i] = W
-    # pre[i] = r_pre
-    # post[i] = r_post
-    delta_W = alphas[i] * r_post*(r_pre.t() - r_post*W_FF)
-    W_FF += delta_W
-    # TODO GT anti-hebbian for recurrent weights    
-        
-    # optim.zero_grad()
-    # loss.backward()
-    # optim.step()
+
+    W_ff[i] = W_FF
+    W_r[i] = W_R
+    pre[i] = X
+    post[i] = Y
+
+    delta_W_FF = alphas[i] * Y.unsqueeze(1) * (X.unsqueeze(0) - Y.unsqueeze(1) * W_FF)
+    W_FF += delta_W_FF
+    delta_W_R = -1 * torch.diag(Y * Y)
+    W_R += delta_W_R
 
 
 plt.plot(losses)
 plt.savefig("losses_gt.png")
 torch.save(losses, "losses_gt.pt")
-# torch.save(pre, "r_pre_gd.pt")
-# torch.save(post, "r_post_gd.pt")
-# torch.save(W_val, "weights_gd.pt")
+torch.save(pre, "r_pre_gt.pt")
+torch.save(post, "r_post_gt.pt")
+torch.save(W_ff, "w_ff_gt.pt")
+torch.save(W_r, "w_r_gt.pt")
