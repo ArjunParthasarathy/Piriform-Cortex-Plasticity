@@ -54,6 +54,9 @@ def prepare_features(pre, post, W):
     # Num terms in polynomial is (degree + 1) ** num_vars
     numterms = (degree + 1) ** numvars
 
+    pre = pre.unsqueeze(0).broadcast_to(W.shape).flatten()
+    post = post.unsqueeze(1).broadcast_to(W.shape).flatten()
+    W = W.flatten()
     features = torch.stack((pre, post, W), dim=1)
     
     features = features.unsqueeze(1).expand((-1, numterms, -1))
@@ -69,11 +72,7 @@ def prepare_features(pre, post, W):
     return transformed_features
 
 def prepare_labels(W0, Wf):
-    # # Last diff should be 0
-    # delta_W = torch.empty_like(W)
-    # delta_W[:-1, :] = torch.diff(W, dim=0)
-    # delta_W[-1, :] = torch.zeros(N)
-    delta_W = Wf - W0
+    delta_W = Wf.flatten() - W0.flatten()
     return delta_W
 
 # Subdivides loss and returns in 2D tensor of (num_intervals, 2) where the second dim gives (epoch_start, epoch_end)
@@ -100,7 +99,7 @@ def load_loss(num_intervals, epoch_bound):
     
     return epoch_intervals
 
-def fit_powerseries(X, Y):
+def fit_powerseries(X, Y, alpha=1e-1):
     # L1 ratio - 0.02 is all L2, 1 is all L1
     #reg = ElasticNet(l1_ratio=0.02)
     #reg = RidgeCV(alphas=torch.arange(1, 11) * 0.05)
@@ -109,7 +108,7 @@ def fit_powerseries(X, Y):
     # Already have intercept from power series transform
     #reg = LinearRegression(fit_intercept=False)
     #reg = LinearRegression(fit_intercept=True) # now we have intercept
-    reg = Lasso(alpha=1e-1, fit_intercept=False)
+    reg = Lasso(alpha=alpha, fit_intercept=False)
     reg.fit(X, Y)
 
     return reg
@@ -133,7 +132,7 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
         oja_train_samples.append(features_oja)
         oja_train_labels.append(labels_oja)
         
-        features_ahebb = prepare_features(pre, post, WR_0)
+        features_ahebb = prepare_features(post, post, WR_0)
         labels_ahebb = prepare_labels(WR_0, WR_f)
         ahebb_train_samples.append(features_ahebb)
         ahebb_train_labels.append(labels_ahebb)
@@ -176,7 +175,7 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         Q = Q.to(gpu)
         D = torch.diag(torch.exp(-torch.arange(N_x))).to(gpu)
         Sigma = Q @ D @ Q.t()
-        r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N_x, device=gpu), Sigma)
+        r_dist_accum = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N_x, device=gpu), Sigma)
     else:
         r_dist_accum = r_dist
 
@@ -190,10 +189,10 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
     # eigvals sorted in ascending order so take last one
     pc_i = eigvecs[:, -N_y:].t()
 
-    W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
+    W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x)).to(gpu)
     Wff_gt = W_FF.clone()
 
-    W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
+    W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y)).to(gpu)
     Wr_gt = W_R.clone()
 
     alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (num_steps-1)))
@@ -201,10 +200,10 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
     losses = torch.empty((num_steps,))
     losses_gt = torch.empty((num_steps,))
     for i in range(num_steps):
-        pre = r_dist_accum.sample()
+        pre = r_dist_accum.sample().to(gpu)
         
-        W_tilde = torch.linalg.inv(torch.eye(N_y) - W_R)
-        Wtilde_gt = torch.linalg.inv(torch.eye(N_y) - Wr_gt)
+        W_tilde = torch.linalg.inv(torch.eye(N_y, device=gpu) - W_R)
+        Wtilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) - Wr_gt)
 
         # Post computed with our powerseries' updates to respective weights
         post_hat = W_tilde @ (W_FF @ pre)
@@ -214,16 +213,16 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         # The actual state both rules should get to
         post_target = pc_i @ pre
         
-        features_oja = prepare_features(pre, post_hat, W_FF)
+        features_oja = prepare_features(pre.cpu(), post_hat.cpu(), W_FF.cpu())
         # No alpha rate on anti-hebb lateral plasticity
-        features_ahebb = prepare_features(post_hat, post_hat, W_R)
+        features_ahebb = prepare_features(post_hat.cpu(), post_hat.cpu(), W_R.cpu())
 
         # alphas are same as training so we can z-score after multiplying by alpha
         if alpha_mode == "same":
             features_oja = alphas_accum[i] * features_oja
         # LR doesn't decrease so converges faster than gradient descent, but less stable
         features_oja = (features_oja - X_oja_mu) / (X_oja_std + eps)
-        features_ahebb = (features_oja - X_ahebb_mu) / (X_ahebb_std + eps)
+        features_ahebb = (features_ahebb - X_ahebb_mu) / (X_ahebb_std + eps)
         
         # Loss from using accumulation rule
         loss = torch.mean(torch.abs(post_hat-post_target))
@@ -234,12 +233,14 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         losses_gt[i] = loss_gt.item()
         
         delta_W_FF = torch.from_numpy(reg_oja.predict(features_oja.detach().cpu().numpy())) * Y_oja_std + Y_oja_mu
+        delta_W_FF = delta_W_FF.view(W_FF.shape).to(gpu)
         delta_W_R = torch.from_numpy(reg_ahebb.predict(features_ahebb.detach().cpu().numpy())) * Y_ahebb_std + Y_ahebb_mu
+        delta_W_R = delta_W_R.view(W_R.shape).to(gpu)
         if alpha_mode == "after":
             delta_W_FF *= alphas_accum[i] * delta_W_FF
 
-        delta_Wff_gt = post_gt * (pre - post_gt * Wff_gt)
-        delta_Wr_gt = -1 * (post_gt * post_gt)
+        delta_Wff_gt = post_gt.unsqueeze(1) * (pre.unsqueeze(0) - post_gt.unsqueeze(1) * Wff_gt)
+        delta_Wr_gt = -1 * torch.diag(post_gt * post_gt)
         W_FF += learning_rate_scale * delta_W_FF
         Wff_gt += learning_rate_scale * delta_Wff_gt
         W_R += learning_rate_scale * delta_W_R
@@ -264,9 +265,7 @@ def compare_coefs(degree, numvars, coef):
 
     fig.supxlabel("degree post")
     fig.supylabel("degree pre")
-
-    fig.suptitle("Oja's Linear Predictor Coefficients")    
-    plt.show()
+    return fig
 
 
 loss_intervals, oja_features_X_stats, oja_features_Y_stats, ahebb_features_X_stats, ahebb_features_Y_stats = prepare_train_data(alphas, num_intervals=50, epoch_subset=None)
@@ -275,15 +274,18 @@ oja_labels, oja_Y_mu, oja_Y_std = oja_features_Y_stats
 ahebb_features, ahebb_X_mu, ahebb_X_std = ahebb_features_X_stats
 ahebb_labels, ahebb_Y_mu,ahebb_Y_std = ahebb_features_Y_stats
 #print(f"Loss intervals: {loss_intervals}")
-reg_oja = fit_powerseries(oja_features, oja_labels)
-reg_ahebb = fit_powerseries(ahebb_features, ahebb_labels)
+reg_oja = fit_powerseries(oja_features, oja_labels, alpha=5e-1)
+reg_ahebb = fit_powerseries(ahebb_features, ahebb_labels, alpha=1e-1)
 print(f"(Predicted) Oja Coefs: {reg_oja.coef_}")
 print(f"(Predicted) Anti-Hebbian Coefs: {reg_ahebb.coef_}")
 print(f"Oja R^2: {reg_oja.score(oja_features, oja_labels)}")
 print(f"Anti-Hebbian R^2: {reg_ahebb.score(ahebb_features, ahebb_labels)}")
-compare_coefs(degree=degree, numvars=3, coef=reg_oja.coef_)
+fig = compare_coefs(degree=degree, numvars=3, coef=reg_oja.coef_)
+fig.suptitle("Oja's Linear Predictor Coefficients")
 plt.savefig("oja_coefs.png")
-compare_coefs(degree=degree, numvars=3, coef=reg_ahebb.coef_)
+plt.close()
+fig = compare_coefs(degree=degree, numvars=3, coef=reg_ahebb.coef_)
+fig.suptitle("Anti-Hebbian Linear Predictor Coefficients")
 plt.savefig("anti_hebbian_coefs.png")
 plt.close()
 
