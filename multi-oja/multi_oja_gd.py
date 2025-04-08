@@ -75,7 +75,7 @@ for i in range(n_train):
     W_ff[i] = W_FF
     W_r[i] = W_R
     pre[i] = X
-    post[i] = Y
+    post[i] = Y_hat
 
     optim_FF.zero_grad()
     optim_R.zero_grad()

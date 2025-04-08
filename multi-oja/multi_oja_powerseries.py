@@ -27,7 +27,7 @@ sigma_R = 0.1
 W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
 W_R = W_R.to(gpu)
 
-n_train = 3000
+n_train = 5000
 alpha_start = 1e-2
 alpha_end = 1e-3
 # Exponential decay lr starting at alpha_start and ending at alpha_end
@@ -201,16 +201,13 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
     for i in range(num_steps):
         pre = r_dist_accum.sample().to(gpu)
         
-        W_tilde = torch.linalg.inv(torch.eye(N_y, device=gpu) - W_R)
-        Wtilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) - Wr_gt)
+        W_tilde = torch.linalg.inv(torch.eye(N_y, device=gpu) - W_R) @ W_FF
+        Wtilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) - Wr_gt) @ Wff_gt
 
         # Post computed with our powerseries' updates to respective weights
-        post_hat = W_tilde @ (W_FF @ pre)
+        post_hat = W_tilde @ pre
         # Post computed with Oja's and anti-Hebbian rules applied to the respective weights
-        post_gt = Wtilde_gt @ (Wff_gt @ pre)
-
-        # The actual state both rules should get to
-        post_target = pc_i @ pre
+        post_gt = Wtilde_gt @ pre
         
         features_oja = prepare_features(pre.cpu(), post_hat.cpu(), W_FF.cpu())
         # No alpha rate on anti-hebb lateral plasticity
@@ -222,11 +219,20 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         # LR doesn't decrease so converges faster than gradient descent, but less stable
         features_oja = (features_oja - X_oja_mu) / (X_oja_std + eps)
         features_ahebb = (features_ahebb - X_ahebb_mu) / (X_ahebb_std + eps)
+
+        norm_pci = pc_i / torch.linalg.vector_norm(pc_i, dim=1).unsqueeze(1)
+        norm_W_tilde = W_tilde / torch.linalg.vector_norm(W_tilde, dim=1).unsqueeze(1)
+        norm_Wtilde_gt = Wtilde_gt / torch.linalg.vector_norm(Wtilde_gt, dim=1).unsqueeze(1)
+
+        # unsqueezing to match required bmm format (bmm is just doing a dot product here)
+        a = torch.bmm(norm_W_tilde.unsqueeze(1), norm_pci.unsqueeze(2))
+        b = torch.bmm(norm_Wtilde_gt.unsqueeze(1), norm_pci.unsqueeze(2))
         
         # Loss from using accumulation rule
-        loss = torch.mean(torch.abs(post_hat-post_target))
+        loss = 1-torch.mean(torch.abs(a))
         # Loss from using actual Oja + anti-Hebbian rule
-        loss_gt = torch.mean(torch.abs(post_gt-post_target))
+        loss_gt = 1-torch.mean(torch.abs(b))
+
         print(f"Iter {i}: {loss.item()}")
         losses[i] = loss.item()
         losses_gt[i] = loss_gt.item()
@@ -236,12 +242,14 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         delta_W_R = torch.from_numpy(reg_ahebb.predict(features_ahebb.detach().cpu().numpy())) * Y_ahebb_std + Y_ahebb_mu
         delta_W_R = delta_W_R.view(W_R.shape).to(gpu)
         if alpha_mode == "after":
-            delta_W_FF *= alphas_accum[i] * delta_W_FF
+            delta_W_FF = alphas_accum[i] * delta_W_FF
 
-        delta_Wff_gt = post_gt.unsqueeze(1) * (pre.unsqueeze(0) - post_gt.unsqueeze(1) * Wff_gt)
+        delta_Wff_gt = alphas_accum[i] * post_gt.unsqueeze(1) * (pre.unsqueeze(0) - post_gt.unsqueeze(1) * Wff_gt)
         delta_Wr_gt = -1 * torch.diag(post_gt * post_gt)
+        
         W_FF += learning_rate_scale * delta_W_FF
         Wff_gt += learning_rate_scale * delta_Wff_gt
+        
         W_R += learning_rate_scale * delta_W_R
         Wr_gt += learning_rate_scale * delta_Wr_gt
 
@@ -291,9 +299,11 @@ plt.close()
 oja_features_stats = (oja_X_mu, oja_X_std, oja_Y_mu, oja_Y_std)
 ahebb_features_stats = (ahebb_X_mu, ahebb_X_std, ahebb_Y_mu, ahebb_Y_std)
 losses, losses_gt = accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, 
-                                learning_rate_scale=0.1, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=True)
-plt.plot(losses)
+                                learning_rate_scale=1, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=False)
+plt.plot(losses, color="tab:blue", label="Pred")
+plt.plot(losses_gt, color="tab:orange", label="GT")
 plt.ylim([0, 1])
 plt.title("Loss: Learning Rule Accumulation")
+plt.legend()
 plt.savefig("accum_rule.png")
 plt.show()
