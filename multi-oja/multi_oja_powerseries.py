@@ -23,27 +23,30 @@ r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(
 W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
 W_FF = W_FF.to(gpu)
 
-sigma_R = 0.1
+sigma_R = 0.05
 W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
 W_R = W_R.to(gpu)
 
-n_train = 5000
+n_train = 3000
 alpha_start = 1e-2
-alpha_end = 1e-3
+alpha_end = 1e-2
+alpha_hebb_start = 1e-3
+alpha_hebb_end = 1e-3
 # Exponential decay lr starting at alpha_start and ending at alpha_end
 alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
 #alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
+alphas_hebb = alpha_hebb_start*torch.exp(torch.arange(n_train) * (np.log(alpha_hebb_end / alpha_hebb_start) / (n_train-1)))
 
 degree = 2
 
-def load_features(start, end):
-    pre = torch.load("r_pre_gt.pt").detach().cpu()
+def load_features(start, end, fromwhere="gd"):
+    pre = torch.load("r_pre_" + fromwhere + ".pt").detach().cpu()
     pre_start = pre[start, :]
-    post = torch.load("r_post_gt.pt").detach().cpu()
+    post = torch.load("r_post_" + fromwhere + ".pt").detach().cpu()
     post_start = post[start, :]
-    W_FF = torch.load("w_ff_gt.pt").detach().cpu()
+    W_FF = torch.load("w_ff_" + fromwhere + ".pt").detach().cpu()
     Wff_0, Wff_f = W_FF[start, :], W_FF[end, :]
-    W_R = torch.load("w_r_gt.pt").detach().cpu()
+    W_R = torch.load("w_r_" + fromwhere + ".pt").detach().cpu()
     WR_0, WR_f = W_R[start, :], W_R[end, :]
     return pre_start, post_start, Wff_0, Wff_f, WR_0, WR_f
 
@@ -75,10 +78,10 @@ def prepare_labels(W0, Wf):
     return delta_W
 
 # Subdivides loss and returns in 2D tensor of (num_intervals, 2) where the second dim gives (epoch_start, epoch_end)
-def load_loss(num_intervals, epoch_bound):
+def load_loss(num_intervals, epoch_bound, fromwhere="gd"):
     if epoch_bound == None:
         epoch_bound = (0, n_train)
-    losses = torch.load(f"losses_gd.pt").detach().cpu()
+    losses = torch.load(f"losses_" + fromwhere + ".pt").detach().cpu()
     losses_region = losses[epoch_bound[0]: epoch_bound[1]]
     total_reduction = losses_region[-1] - losses_region[0]
     interval = total_reduction / (num_intervals)
@@ -112,8 +115,8 @@ def fit_powerseries(X, Y, alpha=1e-1):
 
     return reg
 
-def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):    
-    loss_intervals = load_loss(num_intervals, epoch_subset)
+def prepare_train_data(alphas, num_intervals=5, epoch_subset=None, fromwhere="gd"):    
+    loss_intervals = load_loss(num_intervals, epoch_subset, fromwhere=fromwhere)
     oja_train_samples = []
     oja_train_labels = []
     ahebb_train_samples = []
@@ -124,7 +127,7 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None):
     for i in range(num_intervals):
         start, end = b[i], b[i+1]
         #start, end = loss_intervals[i]
-        pre, post, Wff_0, Wff_f, WR_0, WR_f = load_features(start, end)
+        pre, post, Wff_0, Wff_f, WR_0, WR_f = load_features(start, end, fromwhere=fromwhere)
         features_oja = prepare_features(pre, post, Wff_0)
         features_oja = alphas[start] * features_oja
         labels_oja = prepare_labels(Wff_0, Wff_f)
@@ -186,7 +189,7 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
     c = torch.cov(r_dist_accum.sample((B,)).t())
     _, eigvecs = torch.linalg.eigh(c)
     # eigvals sorted in ascending order so take last one
-    pc_i = eigvecs[:, -N_y:].t()
+    pc_i = eigvecs[:, -N_y:].t().flip(dims=(0,))
 
     W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x)).to(gpu)
     Wff_gt = W_FF.clone()
@@ -195,6 +198,7 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
     Wr_gt = W_R.clone()
 
     alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (num_steps-1)))
+    alphas_accum_hebb = alpha_hebb_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_hebb_end / alpha_hebb_start) / (num_steps-1)))
 
     losses = torch.empty((num_steps,))
     losses_gt = torch.empty((num_steps,))
@@ -202,12 +206,12 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         pre = r_dist_accum.sample().to(gpu)
         
         W_tilde = torch.linalg.inv(torch.eye(N_y, device=gpu) - W_R) @ W_FF
-        Wtilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) - Wr_gt) @ Wff_gt
+        W_tilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) - Wr_gt) @ Wff_gt
 
         # Post computed with our powerseries' updates to respective weights
         post_hat = W_tilde @ pre
         # Post computed with Oja's and anti-Hebbian rules applied to the respective weights
-        post_gt = Wtilde_gt @ pre
+        post_gt = W_tilde_gt @ pre
         
         features_oja = prepare_features(pre.cpu(), post_hat.cpu(), W_FF.cpu())
         # No alpha rate on anti-hebb lateral plasticity
@@ -222,16 +226,25 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
 
         norm_pci = pc_i / torch.linalg.vector_norm(pc_i, dim=1).unsqueeze(1)
         norm_W_tilde = W_tilde / torch.linalg.vector_norm(W_tilde, dim=1).unsqueeze(1)
-        norm_Wtilde_gt = Wtilde_gt / torch.linalg.vector_norm(Wtilde_gt, dim=1).unsqueeze(1)
+        norm_Wtilde_gt = W_tilde_gt / torch.linalg.vector_norm(W_tilde_gt, dim=1).unsqueeze(1)
 
         # unsqueezing to match required bmm format (bmm is just doing a dot product here)
-        a = torch.bmm(norm_W_tilde.unsqueeze(1), norm_pci.unsqueeze(2))
-        b = torch.bmm(norm_Wtilde_gt.unsqueeze(1), norm_pci.unsqueeze(2))
+        # a = torch.bmm(norm_W_tilde.unsqueeze(1), norm_pci.unsqueeze(2))
+        # b = torch.bmm(norm_Wtilde_gt.unsqueeze(1), norm_pci.unsqueeze(2))
+        
+        PCs2output = torch.zeros((pc_i.shape[0]), dtype=torch.int, requires_grad=False)
+        PCs2output_gt = torch.zeros((pc_i.shape[0]), dtype=torch.int, requires_grad=False)
+        for ii in range(pc_i.shape[0]):
+            with torch.no_grad():
+                PCs2output[ii] = torch.argmax(W_tilde @ pc_i[ii, :] * 1 / (torch.linalg.vector_norm(W_tilde, dim=1)))
+                PCs2output_gt[ii] = torch.argmax(W_tilde_gt @ pc_i[ii, :] * 1 / (torch.linalg.vector_norm(W_tilde_gt, dim=1)))
+        overlaps = torch.diag((W_tilde[PCs2output, :] @ pc_i.t()) * 1 / torch.linalg.vector_norm(W_tilde[PCs2output, :], dim=1))
+        overlaps_gt = torch.diag((W_tilde_gt[PCs2output_gt, :] @ pc_i.t()) * 1 / torch.linalg.vector_norm(W_tilde_gt[PCs2output_gt, :], dim=1))
         
         # Loss from using accumulation rule
-        loss = 1-torch.mean(torch.abs(a))
+        loss = 1-torch.mean(torch.abs(overlaps))
         # Loss from using actual Oja + anti-Hebbian rule
-        loss_gt = 1-torch.mean(torch.abs(b))
+        loss_gt = 1-torch.mean(torch.abs(overlaps_gt))
 
         print(f"Iter {i}: {loss.item()}")
         losses[i] = loss.item()
@@ -243,15 +256,16 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         delta_W_R = delta_W_R.view(W_R.shape).to(gpu)
         if alpha_mode == "after":
             delta_W_FF = alphas_accum[i] * delta_W_FF
+            delta_W_R = alphas_accum_hebb[i] * delta_W_R
 
         delta_Wff_gt = alphas_accum[i] * post_gt.unsqueeze(1) * (pre.unsqueeze(0) - post_gt.unsqueeze(1) * Wff_gt)
-        delta_Wr_gt = -1 * torch.diag(post_gt * post_gt)
+        delta_Wr_gt = -alphas_accum_hebb[i] * (post_gt[:, None] @ post_gt[None, :])
         
         W_FF += learning_rate_scale * delta_W_FF
         Wff_gt += learning_rate_scale * delta_Wff_gt
         
-        W_R += learning_rate_scale * delta_W_R
-        Wr_gt += learning_rate_scale * delta_Wr_gt
+        W_R +=  1 / np.sqrt(N_y) * learning_rate_scale * delta_W_R
+        Wr_gt +=  1 / np.sqrt(N_y) * learning_rate_scale * delta_Wr_gt
 
 
     return losses, losses_gt
@@ -275,7 +289,7 @@ def compare_coefs(degree, numvars, coef):
     return fig
 
 
-loss_intervals, oja_features_X_stats, oja_features_Y_stats, ahebb_features_X_stats, ahebb_features_Y_stats = prepare_train_data(alphas, num_intervals=50, epoch_subset=None)
+loss_intervals, oja_features_X_stats, oja_features_Y_stats, ahebb_features_X_stats, ahebb_features_Y_stats = prepare_train_data(alphas, num_intervals=200, epoch_subset=None, fromwhere="gt")
 oja_features, oja_X_mu, oja_X_std = oja_features_X_stats
 oja_labels, oja_Y_mu, oja_Y_std = oja_features_Y_stats
 ahebb_features, ahebb_X_mu, ahebb_X_std = ahebb_features_X_stats
@@ -299,7 +313,7 @@ plt.close()
 oja_features_stats = (oja_X_mu, oja_X_std, oja_Y_mu, oja_Y_std)
 ahebb_features_stats = (ahebb_X_mu, ahebb_X_std, ahebb_Y_mu, ahebb_Y_std)
 losses, losses_gt = accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, 
-                                learning_rate_scale=1, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=False)
+                                learning_rate_scale=1, num_steps=n_train * 1, alpha_mode="same", sample_new_cov=True)
 plt.plot(losses, color="tab:blue", label="Pred")
 plt.plot(losses_gt, color="tab:orange", label="GT")
 plt.ylim([0, 1])
