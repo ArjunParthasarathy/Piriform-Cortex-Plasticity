@@ -11,14 +11,17 @@ N_y = 4
 M = torch.normal(torch.zeros((N_x, N_x)), torch.ones((N_x, N_x)))
 Q, _ = torch.linalg.qr(M)
 Q = Q.to(gpu)
-D = torch.diag(torch.exp(-torch.arange(N_x))).to(gpu)
+#D = torch.diag(torch.exp(-torch.arange(N_x))).to(gpu)
+# Trying linearly decreasing eigenvalues to make it easier to learn multiple PCs
+# By increasing these eigenvalues we also increase variance of input
+D = torch.diag(torch.linspace(1, 0.1, N_x) / torch.sum(torch.linspace(1, 0.1, N_x))).to(gpu)
 Sigma = Q @ D @ Q.t()
 r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N_x, device=gpu), Sigma)
 
 W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
 W_FF = W_FF.to(gpu)
-W_FF.requires_grad_(True)
-sigma_R = 0.1
+#W_FF.requires_grad_(True)
+sigma_R = 0.01
 W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
 W_R = W_R.to(gpu)
 W_R.requires_grad_(True)
@@ -26,12 +29,15 @@ W_R.requires_grad_(True)
 lr = 1e-1
 n_train = 3000
 alpha_start = 1e-2
-alpha_end = 1e-2
+alpha_end = 1e-3
 # Exponential decay lr starting at alpha_start and ending at alpha_end
 alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
 #alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
-optim_FF = torch.optim.Adam([W_FF], lr=lr)
-optim_R = torch.optim.Adam([W_R], lr=lr)
+#optim_FF = torch.optim.Adam([W_FF], lr=lr)
+#optim_R = torch.optim.Adam([W_R], lr=lr)
+# No momentum so just vanilla gradient descent
+#optim_FF = torch.optim.SGD([W_FF], lr=lr, momentum=0.)
+optim_R = torch.optim.SGD([W_R], lr=lr, momentum=0.)
 
 losses = torch.empty((n_train,))
 W_ff = torch.empty(n_train, N_y, N_x)
@@ -64,31 +70,42 @@ for i in range(n_train):
     # # transposing and unsqueezing to match required bmm format
     # a = torch.bmm(norm_W.unsqueeze(1), norm_pci.unsqueeze(2)).squeeze(1, 2)
 
-    lambda_ff = 1
-    lambda_r = 5
-    l1reg_ff = torch.mean(torch.sum(W_FF ** 2) / (N_y*N_x))
-    l1reg_r = torch.mean(torch.sum(W_R ** 2) / (N_x*N_x))
+    # lambda_ff = 1
+    # lambda_r = 5
+    # l2reg_ff = torch.mean(torch.sum(W_FF ** 2) / (N_y*N_x))
     # loss = torch.mean((Y-Y_hat) ** 2) + lambda_ff*l1reg_ff + lambda_r*l1reg_r
     # for each PC, find the best-aligned post neuron
-    PCs2output = torch.zeros((pc_i.shape[0]), dtype=torch.int, requires_grad=False)
-    for ii in range(pc_i.shape[0]):
-        with torch.no_grad():
-            PCs2output[ii] = torch.argmax(W_tilde @ pc_i[ii, :] * 1 / (torch.linalg.vector_norm(W_tilde, dim=1)))
+    #PCs2output = torch.zeros((pc_i.shape[0]), dtype=torch.int, requires_grad=False)
+    PCs2output = torch.arange(pc_i.shape[0])
+    # for ii in range(pc_i.shape[0]):
+    #     with torch.no_grad():
+    #         PCs2output[ii] = torch.argmax(W_tilde @ pc_i[ii, :] * 1 / (torch.linalg.vector_norm(W_tilde, dim=1)))
+    # With this best-aligned neuron, how much it overlaps with its respective PC
+    # If we have multiple neurons encoding the same PC, then there would be a PC which is not represented well by any neuron
+    # And this would be reflected in the loss
     overlaps = torch.diag((W_tilde[PCs2output, :] @ pc_i.t()) * 1 / torch.linalg.vector_norm(W_tilde[PCs2output, :], dim=1))
-    loss = 1 - torch.mean(torch.abs(overlaps))
-    print(f"Iter {i}: {loss.item()}, overlaps: {overlaps}")
+    
+    lambda_r = 10
+    l2reg_r = torch.sum(W_R ** 2) / (N_x*N_x)
+    loss = 1 - torch.mean(torch.abs(overlaps)) + lambda_r*l2reg_r
+    
+    print(f"Iter {i}: {loss.item()}, overlaps: {overlaps}, best-aligned: {PCs2output}")
     losses[i] = loss.item()
     W_ff[i] = W_FF
     W_r[i] = W_R
     pre[i] = X
     post[i] = Y_hat
 
-    optim_FF.zero_grad()
+    #optim_FF.zero_grad()
     optim_R.zero_grad()
     
     loss.backward()
 
-    optim_FF.step()
+    with torch.no_grad():
+        delta_W_FF = alphas[i] * Y_hat.unsqueeze(1) * (X.unsqueeze(0) - Y_hat.unsqueeze(1) * W_FF)
+        W_FF += delta_W_FF
+
+    #optim_FF.step()
     optim_R.step()
 
 

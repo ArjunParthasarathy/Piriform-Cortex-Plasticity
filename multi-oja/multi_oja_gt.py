@@ -63,6 +63,7 @@ for i in range(n_train):
     PCs2output = torch.zeros((pc_i.shape[0]), dtype=torch.int, requires_grad=False)
     for ii in range(pc_i.shape[0]):
         with torch.no_grad():
+            # Which PC had the largest overlap with each of the encoded output weights
             PCs2output[ii] = torch.argmax(W_tilde @ pc_i[ii, :] * 1 / (torch.linalg.vector_norm(W_tilde, dim=1)))
     overlaps = torch.diag((W_tilde[PCs2output, :] @ pc_i.t()) * 1 / torch.linalg.vector_norm(W_tilde[PCs2output, :], dim=1))
     loss = 1 - torch.mean(torch.abs(overlaps))
