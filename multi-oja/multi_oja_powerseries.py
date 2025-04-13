@@ -8,37 +8,6 @@ gpu = torch.device("cuda:0")
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-eps = 1e-7
-# Neurons in input layer
-N_x = 16
-# Neurons in output layer - leq to input layer neurons
-N_y = 4
-M = torch.normal(torch.zeros((N_x, N_x)), torch.ones((N_x, N_x)))
-Q, _ = torch.linalg.qr(M)
-Q = Q.to(gpu)
-D = torch.diag(torch.exp(-torch.arange(N_x))).to(gpu)
-Sigma = Q @ D @ Q.t()
-r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N_x, device=gpu), Sigma)
-
-W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
-W_FF = W_FF.to(gpu)
-
-sigma_R = 0.05
-W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
-W_R = W_R.to(gpu)
-
-n_train = 3000
-alpha_start = 1e-1
-alpha_end = 1e-4
-alpha_hebb_start = 1e-1
-alpha_hebb_end = 1e-3
-# Exponential decay lr starting at alpha_start and ending at alpha_end
-alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
-#alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
-alphas_hebb = alpha_hebb_start*torch.exp(torch.arange(n_train) * (np.log(alpha_hebb_end / alpha_hebb_start) / (n_train-1)))
-
-degree = 2
-
 def load_features(start, end, fromwhere="gd"):
     pre = torch.load("r_pre_" + fromwhere + ".pt").detach().cpu()
     pre_start = pre[start, :]
@@ -115,7 +84,7 @@ def fit_powerseries(X, Y, alpha=1e-1):
 
     return reg
 
-def prepare_train_data(alphas, num_intervals=5, epoch_subset=None, fromwhere="gd"):    
+def prepare_train_data(alphas, alphas_hebb, num_intervals=5, epoch_subset=None, fromwhere="gd"):    
     loss_intervals = load_loss(num_intervals, epoch_subset, fromwhere=fromwhere)
     oja_train_samples = []
     oja_train_labels = []
@@ -135,6 +104,7 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None, fromwhere="gd
         oja_train_labels.append(labels_oja)
         
         features_ahebb = prepare_features(post, post, WR_0)
+        features_ahebb = alphas_hebb[start] * features_ahebb
         labels_ahebb = prepare_labels(WR_0, WR_f)
         ahebb_train_samples.append(features_ahebb)
         ahebb_train_labels.append(labels_ahebb)
@@ -170,7 +140,7 @@ def prepare_train_data(alphas, num_intervals=5, epoch_subset=None, fromwhere="gd
     return loss_intervals, oja_features_X_stats, oja_features_Y_stats, ahebb_features_X_stats, ahebb_features_Y_stats
 
 
-def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, learning_rate_scale=1.0, num_steps=100, alpha_mode="none", sample_new_cov=True):
+def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, learning_rate_scale=1.0, num_steps=100, alpha_mode="none", sample_new_cov=True, force_oja=True):
     if sample_new_cov:
         M = torch.normal(torch.zeros((N_x, N_x)), torch.ones((N_x, N_x)))
         Q, _ = torch.linalg.qr(M)
@@ -197,16 +167,16 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
     W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y)).to(gpu)
     Wr_gt = W_R.clone()
 
-    alphas_accum = alpha_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (num_steps-1)))
-    alphas_accum_hebb = alpha_hebb_start*torch.exp(torch.arange(num_steps) * (np.log(alpha_hebb_end / alpha_hebb_start) / (num_steps-1)))
+    alphas_accum = alpha_start * torch.exp(torch.arange(num_steps) * (np.log(alpha_end / alpha_start) / (num_steps - 1)))
+    alphas_accum_hebb = alpha_hebb_start * torch.exp(torch.arange(num_steps) * (np.log(alpha_hebb_end / alpha_hebb_start) / (num_steps - 1)))
 
     losses = torch.empty((num_steps,))
     losses_gt = torch.empty((num_steps,))
     for i in range(num_steps):
         pre = r_dist_accum.sample().to(gpu)
         
-        W_tilde = torch.linalg.inv(torch.eye(N_y, device=gpu) - W_R) @ W_FF
-        W_tilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) - Wr_gt) @ Wff_gt
+        W_tilde = torch.linalg.inv(torch.eye(N_y, device=gpu) -  W_R_scale * W_R) @ W_FF
+        W_tilde_gt = torch.linalg.inv(torch.eye(N_y, device=gpu) -  W_R_scale * Wr_gt) @ Wff_gt
 
         # Post computed with our powerseries' updates to respective weights
         post_hat = W_tilde @ pre
@@ -242,15 +212,18 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         overlaps_gt = torch.diag((W_tilde_gt[PCs2output_gt, :] @ pc_i.t()) * 1 / torch.linalg.vector_norm(W_tilde_gt[PCs2output_gt, :], dim=1))
         
         # Loss from using accumulation rule
-        loss = 1-torch.mean(torch.abs(overlaps))
+        loss = 1 - torch.mean(torch.abs(overlaps))
         # Loss from using actual Oja + anti-Hebbian rule
-        loss_gt = 1-torch.mean(torch.abs(overlaps_gt))
+        loss_gt = 1 - torch.mean(torch.abs(overlaps_gt))
 
         print(f"Iter {i}: {loss.item()}, overlaps: {overlaps}")
         losses[i] = loss.item()
         losses_gt[i] = loss_gt.item()
         
-        delta_W_FF = torch.from_numpy(reg_oja.predict(features_oja.detach().cpu().numpy())) * Y_oja_std + Y_oja_mu
+        if force_oja:
+            delta_W_FF = post_hat.unsqueeze(1) * (pre.unsqueeze(0) - post_hat.unsqueeze(1) * W_FF.detach())
+        else:
+            delta_W_FF = torch.from_numpy(reg_oja.predict(features_oja.detach().cpu().numpy())) * Y_oja_std + Y_oja_mu
         delta_W_FF = delta_W_FF.view(W_FF.shape).to(gpu)
         delta_W_R = torch.from_numpy(reg_ahebb.predict(features_ahebb.detach().cpu().numpy())) * Y_ahebb_std + Y_ahebb_mu
         delta_W_R = delta_W_R.view(W_R.shape).to(gpu)
@@ -264,8 +237,8 @@ def accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, lea
         W_FF += learning_rate_scale * delta_W_FF
         Wff_gt += learning_rate_scale * delta_Wff_gt
         
-        W_R +=  1 / np.sqrt(N_y) * learning_rate_scale * delta_W_R
-        Wr_gt +=  1 / np.sqrt(N_y) * learning_rate_scale * delta_Wr_gt
+        W_R +=  learning_rate_scale * delta_W_R
+        Wr_gt +=  learning_rate_scale * delta_Wr_gt
 
 
     return losses, losses_gt
@@ -289,40 +262,71 @@ def compare_coefs(degree, numvars, coef):
     return fig
 
 
-loss_intervals, oja_features_X_stats, oja_features_Y_stats, ahebb_features_X_stats, ahebb_features_Y_stats = prepare_train_data(
-    alphas, num_intervals=n_train, epoch_subset=None, fromwhere="gd")
-oja_features, oja_X_mu, oja_X_std = oja_features_X_stats
-oja_labels, oja_Y_mu, oja_Y_std = oja_features_Y_stats
-ahebb_features, ahebb_X_mu, ahebb_X_std = ahebb_features_X_stats
-ahebb_labels, ahebb_Y_mu,ahebb_Y_std = ahebb_features_Y_stats
-#print(f"Loss intervals: {loss_intervals}")
-reg_oja = fit_powerseries(oja_features, oja_labels, alpha=1e-3) # 1e-1
-reg_ahebb = fit_powerseries(ahebb_features, ahebb_labels, alpha=1e-3) #5e-1
-plt.plot(ahebb_labels)
-plt.savefig("w_r.png")
-print(f"(Predicted) Oja Coefs: {reg_oja.coef_}")
-print(f"(Predicted) Anti-Hebbian Coefs: {reg_ahebb.coef_}")
-print(f"Oja R^2: {reg_oja.score(oja_features, oja_labels)}")
-print(f"Anti-Hebbian R^2: {reg_ahebb.score(ahebb_features, ahebb_labels)}")
-fig = compare_coefs(degree=degree, numvars=3, coef=reg_oja.coef_)
-fig.suptitle("Oja's Linear Predictor Coefficients")
-plt.savefig("oja_coefs.png")
-plt.close()
-fig = compare_coefs(degree=degree, numvars=3, coef=reg_ahebb.coef_)
-fig.suptitle("Anti-Hebbian Linear Predictor Coefficients")
-plt.savefig("anti_hebbian_coefs.png")
-plt.close()
+if __name__ == "__main__":
+    eps = 1e-7
+    # Neurons in input layer
+    N_x = 16
+    # Neurons in output layer - leq to input layer neurons
+    N_y = 4
+    M = torch.normal(torch.zeros((N_x, N_x)), torch.ones((N_x, N_x)))
+    Q, _ = torch.linalg.qr(M)
+    Q = Q.to(gpu)
+    D = torch.diag(torch.exp(-torch.arange(N_x))).to(gpu)
+    Sigma = Q @ D @ Q.t()
+    r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(N_x, device=gpu), Sigma)
 
-exit(0)
+    W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
+    W_FF = W_FF.to(gpu)
 
-oja_features_stats = (oja_X_mu, oja_X_std, oja_Y_mu, oja_Y_std)
-ahebb_features_stats = (ahebb_X_mu, ahebb_X_std, ahebb_Y_mu, ahebb_Y_std)
-losses, losses_gt = accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, 
-                                learning_rate_scale=1, num_steps=n_train * 1, alpha_mode="none", sample_new_cov=True)
-plt.plot(losses, color="tab:blue", label="Pred")
-plt.plot(losses_gt, color="tab:orange", label="GT")
-plt.ylim([0, 1])
-plt.title("Loss: Learning Rule Accumulation")
-plt.legend()
-plt.savefig("accum_rule.png")
-plt.show()
+    sigma_R = 0.01
+    W_R_scale = (sigma_R / np.sqrt(N_y))
+    W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y))
+    W_R = W_R.to(gpu)
+
+    n_train = 10000
+    alpha_start = 1e-3
+    alpha_end = 1e-5
+    alpha_hebb_start = 1e-1
+    alpha_hebb_end = 1e-6
+    # Exponential decay lr starting at alpha_start and ending at alpha_end
+    alphas = alpha_start*torch.exp(torch.arange(n_train) * (np.log(alpha_end / alpha_start) / (n_train-1)))
+    #alphas = ((alpha_end - alpha_start) / n_train) * torch.arange(n_train) + alpha_start
+    alphas_hebb = alpha_hebb_start*torch.exp(torch.arange(n_train) * (np.log(alpha_hebb_end / alpha_hebb_start) / (n_train-1)))
+
+    degree = 2
+
+    loss_intervals, oja_features_X_stats, oja_features_Y_stats, ahebb_features_X_stats, ahebb_features_Y_stats = prepare_train_data(
+        alphas, alphas_hebb, num_intervals=n_train, epoch_subset=None, fromwhere="gd")
+    oja_features, oja_X_mu, oja_X_std = oja_features_X_stats
+    oja_labels, oja_Y_mu, oja_Y_std = oja_features_Y_stats
+    ahebb_features, ahebb_X_mu, ahebb_X_std = ahebb_features_X_stats
+    ahebb_labels, ahebb_Y_mu,ahebb_Y_std = ahebb_features_Y_stats
+    #print(f"Loss intervals: {loss_intervals}")
+    reg_oja = fit_powerseries(oja_features, oja_labels, alpha=1e-1) # 1e-1
+    reg_ahebb = fit_powerseries(ahebb_features, ahebb_labels, alpha=1e-3) #5e-1
+
+    print(f"(Predicted) Oja Coefs: {reg_oja.coef_}")
+    print(f"(Predicted) Anti-Hebbian Coefs: {reg_ahebb.coef_}")
+    print(f"Oja R^2: {reg_oja.score(oja_features, oja_labels)}")
+    print(f"Anti-Hebbian R^2: {reg_ahebb.score(ahebb_features, ahebb_labels)}")
+    fig = compare_coefs(degree=degree, numvars=3, coef=reg_oja.coef_)
+    fig.suptitle("Oja's Linear Predictor Coefficients")
+    plt.savefig("oja_coefs.png")
+    fig = compare_coefs(degree=degree, numvars=3, coef=reg_ahebb.coef_)
+    fig.suptitle("Anti-Hebbian Linear Predictor Coefficients")
+    plt.savefig("anti_hebbian_coefs.png")
+    plt.show()
+    plt.close("all")
+
+    oja_features_stats = (oja_X_mu, oja_X_std, oja_Y_mu, oja_Y_std)
+    ahebb_features_stats = (ahebb_X_mu, ahebb_X_std, ahebb_Y_mu, ahebb_Y_std)
+    losses, losses_gt = accum_rule(reg_oja, reg_ahebb, oja_features_stats, ahebb_features_stats, 
+                                    learning_rate_scale=1, num_steps=n_train * 1, alpha_mode="same", sample_new_cov=True, force_oja=False)
+    plt.close("all")
+    plt.plot(losses, color="tab:blue", label="Pred")
+    plt.plot(losses_gt, color="tab:orange", label="GT")
+    plt.ylim([0, 1])
+    plt.title("Loss: Learning Rule Accumulation")
+    plt.legend()
+    plt.savefig("accum_rule.png")
+    plt.show()

@@ -17,13 +17,14 @@ r_dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(
 
 W_FF = torch.normal(torch.zeros(N_y, N_x), torch.ones(N_y, N_x))
 W_FF = W_FF.to(gpu)
-sigma_R = 0.05
-W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y) * ((sigma_R ** 2) / N_y))
+sigma_R = 0.01
+W_R_scale = sigma_R / np.sqrt(N_y)
+W_R = torch.normal(torch.zeros(N_y, N_y), torch.ones(N_y, N_y))
 W_R = W_R.to(gpu)
 
 n_train = 4000
-alpha_start = 1e-2
-alpha_end = 1e-2
+alpha_start = 1e-3
+alpha_end = 1e-3
 alpha_hebb_start = 1e-3
 alpha_hebb_end = 1e-3
 
@@ -52,7 +53,7 @@ for i in range(n_train):
 
     X = r_dist.sample()
     # Convergent dynamics matrix for output layer
-    W_tilde = (torch.linalg.inv((torch.eye(N_y, device=gpu) - W_R)) @ W_FF)
+    W_tilde = (torch.linalg.inv((torch.eye(N_y, device=gpu) - W_R_scale * W_R)) @ W_FF)
     # output neurons predicted with W_FF
     Y_hat = W_tilde @ X
     Y = pc_i @ X
@@ -80,7 +81,7 @@ for i in range(n_train):
     W_FF += delta_W_FF
     # delta_W_R = -alphas_hebb * torch.diag(Y_hat * Y_hat)  # this seems wrong to me, it does not let neurons interact
     delta_W_R = -alphas_hebb[i] * (Y_hat[:, None] @ Y_hat[None, :])
-    W_R += 1 / np.sqrt(N_y) * delta_W_R
+    W_R += delta_W_R
 
 
 plt.plot(losses)
